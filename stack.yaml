@@ -1,0 +1,9 @@
+flags: {}
+extra-package-dbs: []
+packages:
+- '.'
+extra-deps:
+- msgpack-1.0.0
+- msgpack-aeson-0.1.0.0
+- text-1.2.2.0
+resolver: lts-5.6

@@ -1,0 +1,68 @@
+name:                swim
+version:             0.1.0.0
+synopsis:            Initial project template from stack
+description:         Please see README.md
+homepage:            http://github.com/jpfuentes2/swim#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Jacques Fuentes
+maintainer:          jpfuentes2@gmail.com
+copyright:           2016 Jacques Fuentes
+category:            Gossip
+build-type:          Simple
+-- extra-source-files:
+cabal-version:       >=1.10
+
+library
+  hs-source-dirs:      src
+  exposed-modules:     Core, Types
+  build-depends:       base >= 4.7 && < 5
+                     , network-uri
+                     , conduit
+                     , conduit-extra
+                     , conduit-combinators
+                     , word8
+                     , async
+                     , mtl
+                     , bytestring
+                     , network
+                     , aeson
+                     , msgpack
+                     , msgpack-aeson == 0.1.0.0
+                     , transformers
+                     , containers
+                     , stm
+                     , streaming-commons
+                     , atomic-primops
+                     , semigroups
+                     , random
+                     , time == 1.5.0.1
+                     , unix
+  default-language:    Haskell2010
+
+executable swim-exe
+  hs-source-dirs:      app
+  main-is:             Main.hs
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  build-depends:       base
+                     , swim
+  default-language:    Haskell2010
+
+test-suite swim-test
+  type:                exitcode-stdio-1.0
+  hs-source-dirs:      test
+  main-is:             Spec.hs
+  build-depends:       base
+                     , hspec
+                     , hspec-expectations
+                     , swim
+                     , stm
+                     , containers
+                     , atomic-primops
+                     , bytestring
+  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: https://github.com/jpfuentes2/swim
