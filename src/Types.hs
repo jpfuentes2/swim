@@ -23,8 +23,6 @@ type Error = String
 -- replace with SockAddr
 type Host = String
 
--- type Client = Client { addr :: HostAddress }
-
 data Config = Config { bindHost :: String
                      , joinHost :: String
                      , configJoinHosts :: NonEmpty String
@@ -32,18 +30,21 @@ data Config = Config { bindHost :: String
                      }
 
 -- Member
-data Member = Member { memberName :: String
-                     , memberHost :: Host
-                     , memberAlive :: Liveness
+data Member = Member { memberName        :: String
+                     , memberHost        :: Host
+                     , memberAlive       :: Liveness
+                     , memberIncarnation :: Int
+                     , memberLastChange  :: UTCTime
                      -- , memberMeta :: ByteString
-                     } deriving (Show, Eq)
+                     }
+    deriving (Show, Eq)
 
-data EventHost = To String | From String deriving (Show)
+data EventHost = To String | From String deriving (Show, Eq)
 
 data Event = Event { eventHost :: EventHost
                    , eventMsg :: Maybe Message
                    , eventBody :: ByteString
-                   } deriving (Show)
+                   } deriving (Show, Eq)
 
 data Store = Store { storeSeqNo :: AtomicCounter
                    , storeIncarnation :: AtomicCounter
@@ -81,11 +82,18 @@ data Message = Ping { seqNo :: Word32
                     , node        :: String
                     , deadFrom        :: String
                     }
-             | Failed { remoteAddr :: String
-                      , error        :: Error
-                      , message        :: String
-                    }
+             | Compound ByteString
     deriving (Eq, Show)
+
+msgIndex :: Num a => Message -> a
+msgIndex m = case m of
+  Ping{..} -> 0
+  IndirectPing{..} -> 1
+  Ack{..} -> 2
+  Suspect{..} -> 3
+  Alive{..} -> 4
+  Dead{..} -> 5
+  Compound _ -> 6
 
 instance FromJSON Message where
   parseJSON = withObject "message" $ \o -> asum [
@@ -94,8 +102,7 @@ instance FromJSON Message where
     Ack <$> o .: "SeqNo" <*> o .: "Payload",
     Suspect <$> o .: "Incarnation" <*> o .: "Node",
     Alive <$> o .: "Incarnation" <*> o .: "Node" <*> o .: "FromAddr" <*> o .: "Port" <*> o .: "Version",
-    Dead <$> o .: "Incarnation" <*> o .: "Node" <*> o .: "DeadFrom",
-    Failed <$> o .: "RemoteAddr" <*> o .: "Error" <*> o .: "Message" ]
+    Dead <$> o .: "Incarnation" <*> o .: "Node" <*> o .: "DeadFrom"]
 
 instance ToJSON Message where
   toJSON Ping{..} = object [
@@ -125,11 +132,6 @@ instance ToJSON Message where
     "Incarnation" .= incarnation,
     "Node"  .= node,
     "DeadFrom"  .= deadFrom ]
-
-  toJSON Failed{..} = object [
-    "RemoteAddr" .= remoteAddr,
-    "Error"  .= error,
-    "Message"  .= message ]
 
 instance Show UDP.Message where
     show (UDP.Message msgData msgSender) =

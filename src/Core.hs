@@ -20,7 +20,6 @@ import qualified Data.ByteString             as BS ( ByteString, drop, take
                                                    , unpack )
 import           Data.ByteString.Lazy        ( fromStrict, toStrict )
 import qualified Data.Conduit.Combinators    as CC ( map, omapE, print, stdout )
-import qualified Data.Conduit.List           as CL
 import           Data.Conduit.Network        ( sinkSocket )
 import qualified Data.Conduit.Network.UDP    as UDP ( Message(..), msgSender
                                                     , sourceSocket, sinkToSocket )
@@ -132,6 +131,10 @@ handleMessage store = awaitForever $ \r ->
 
                 respond inc $ Just (out, udpMsg)
 
+            -- Just (Dead incarnation node from) -> do
+            --   found <- atomically $ do
+            --     mems <- readTVar $ storeMembers store
+
             -- failed to parse
             Nothing -> respond inc Nothing
 
@@ -177,8 +180,23 @@ dumpEvents s = do
     events <- atomically $ readTVar $ storeEvents s
     mapM_ print events
 
+-- sendAndReceiveState :: State -> Socket -> IO Either Error ()
+-- sendAndReceiveState state socket =
+
+-- sendAndReceiveState :: State -> Socket -> IO Either Error ()
+--  1. connect to remote swim node | error
+--  2. send our state | error
+--  3. receive state | timeout | error
+--  4. error if not push/pull
+--  5. readRemoteState
+
+-- gossip/schedule
+
+-- probe
+
 blah = do
     store <- makeStore
+    -- sendAndReceiveState
     withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
       installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
       UDP.sourceSocket udpSocket 65336 $$ handleMessage store $= UDP.sinkToSocket udpSocket
