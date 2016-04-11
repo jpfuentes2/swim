@@ -24,6 +24,7 @@ library
                      , word8
                      , async
                      , mtl
+                     , either
                      , bytestring
                      , network
                      , aeson
@@ -32,12 +33,13 @@ library
                      , transformers
                      , containers
                      , stm
+                     , stm-conduit
                      , streaming-commons
-                     , atomic-primops
                      , semigroups
                      , random
                      , time == 1.5.0.1
                      , unix
+                     , lens
   default-language:    Haskell2010
 
 executable swim-exe
@@ -58,7 +60,6 @@ test-suite swim-test
                      , swim
                      , stm
                      , containers
-                     , atomic-primops
                      , bytestring
                      , conduit
                      , conduit-extra

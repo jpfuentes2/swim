@@ -5,38 +5,42 @@
 
 module Core where
 
-import qualified Data.Aeson                  as Aeson ( encode )
-import           Data.MessagePack.Aeson      ( packAeson, unpackAeson )
+import qualified Data.Aeson as Aeson (encode)
+import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 
-import           Control.Concurrent          ( forkIO, threadDelay )
-import           Control.Concurrent.STM      ( atomically )
+import           Control.Concurrent (threadDelay)
+import           Control.Concurrent.Async (race)
+import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
+import           Control.Exception.Base (bracket)
 import           Control.Monad.Identity
-import           Control.Monad.IO.Class      ( MonadIO(liftIO) )
-import           Control.Monad.Trans.Class   ( lift )
+import           Control.Monad.IO.Class (MonadIO (liftIO))
+import           Control.Monad.Trans.Class (lift)
+import qualified Data.ByteString             as BS (ByteString, drop, empty,
+                                                    take, unpack)
+import           Data.ByteString.Lazy (fromStrict, toStrict)
 import           Data.Conduit
-import           Data.Atomics.Counter        ( incrCounter, newCounter )
-import qualified Data.ByteString             as BS ( ByteString, drop, take
-                                                   , unpack )
-import           Data.ByteString.Lazy        ( fromStrict, toStrict )
-import qualified Data.Conduit.Combinators    as CC ( map, omapE, print, stdout )
-import           Data.Conduit.Network        ( sinkSocket )
-import qualified Data.Conduit.Network.UDP    as UDP ( Message(..), msgSender
-                                                    , sourceSocket, sinkToSocket )
-import           Data.Either                 ( Either(..) )
-import           Data.Foldable               ( find )
-import qualified Data.List.NonEmpty          as NonEmpty ( fromList )
-import qualified Data.Map.Strict             as Map ( empty, filter )
-import           Data.Monoid                 ( (<>) )
-import           Data.Streaming.Network      ( getSocketUDP )
-import           Data.Time.Clock             ( UTCTime(..), getCurrentTime )
-import           Network.Socket              as NS
-import           Network.Socket.Internal     ( HostAddress
-                                             , SockAddr(SockAddrInet) )
-import           Control.Exception.Base      ( bracket )
-import           System.Posix.Signals        ( Handler(Catch), installHandler
-                                             , sigUSR1 )
-import           System.Random               ( getStdRandom, randomR )
+import qualified Data.Conduit.Combinators as CC (map, omapE, print, stdout, sinkNull)
+import           Data.Conduit.Network (sinkSocket)
+import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
+import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
+                                                     sinkToSocket, sourceSocket)
+import           Data.Either (Either (..))
+import           Data.Either.Combinators (mapLeft)
+import           Data.Foldable (find)
+import qualified Data.List.NonEmpty as NonEmpty (fromList)
+import qualified Data.Map.Strict             as Map (elems, empty, filter,
+                                                     lookup, insert)
+import           Data.Word ( Word16, Word32, Word8 )
+import           Data.Monoid ((<>))
+import           Data.Streaming.Network (getSocketUDP)
+import           Data.Time.Clock (UTCTime (..), getCurrentTime)
+import           Network.Socket as NS
+import           Network.Socket.Internal     (HostAddress,
+                                              SockAddr (SockAddrInet))
+import           System.Posix.Signals        (Handler (Catch), installHandler,
+                                              sigUSR1)
+import           System.Random (getStdRandom, randomR)
 import           Types
 
 type Second = Int
@@ -50,6 +54,9 @@ encode = toStrict . packAeson
 isAlive :: Member -> Bool
 isAlive = (== IsAlive) . memberAlive
 
+notAlive :: Member -> Bool
+notAlive = not . isAlive
+
 decode :: BS.ByteString -> Either Error Message
 decode bs = maybe (Left $ "Could not parse " <> show bs) Right unpacked
   where
@@ -60,21 +67,46 @@ parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
                            , joinHost = "udp://127.0.0.1:4000"
                            , configJoinHosts = NonEmpty.fromList [ "udp://127.0.0.1:4000" ]
                            , configUDPBufferSize = 65336
+                           , cfgGossipNodes = 10
                            }
 
-nextSeqNo :: Store -> IO ()
-nextSeqNo s = void $ incrCounter 1 $ storeSeqNo s
+atomicIncr :: Num a => TVar a -> IO a
+atomicIncr tvar = atomically incr
+  where incr = do
+          a' <- readTVar tvar
+          let a'' = a' + 1
+          writeTVar tvar a'' >> return a''
 
-nextIncarnation :: Store -> IO ()
-nextIncarnation s = void $ incrCounter 1 $ storeIncarnation s
+nextSeqNo :: Store -> IO Int
+nextSeqNo = atomicIncr . storeSeqNo
 
+nextIncarnation :: Store -> IO Int
+nextIncarnation = atomicIncr . storeIncarnation
+
+-- ensures nextIncarnation is >= Int
+nextIncarnation' :: Store -> Int -> STM Int
+nextIncarnation' s n = do
+  inc <- readTVar (storeIncarnation s)
+  let inc' = succ inc
+  if n >= inc' then
+     nextIncarnation' s n
+  else
+     writeTVar (storeIncarnation s) inc' >> return inc'
+
+aliveMembers :: [Member] -> [Member]
 aliveMembers = filter ((== IsAlive) . memberAlive)
 
 removeDeadNodes :: Store -> IO ()
 removeDeadNodes s = atomically $ do
     mems <- readTVar $ storeMembers s
-    swapTVar (storeMembers s) $ Map.filter ((/= IsDead) . memberAlive) mems
+    _ <- swapTVar (storeMembers s) $ Map.filter ((/= IsDead) . memberAlive) mems
     return ()
+
+-- gives kRandomNodes excluding our own host from the list
+kRandomNodesExcludingSelf :: Config -> Store -> IO [Member]
+kRandomNodesExcludingSelf cfg s = do
+  nodes <- liftIO $ atomically $ readTVar $ storeMembers s
+  liftIO $ kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
 
 -- select up to k random nodes, excluding a given
 -- node and any non-alive nodes. It is possible that less than k nodes are returned.
@@ -94,8 +126,11 @@ every' :: Int -> Producer IO UTCTime
 every' d = loop
   where
     loop = do
-        t <- lift $ threadDelay d >> getCurrentTime
+        t <- liftIO $ threadDelay d >> getCurrentTime
         yield t >> loop
+
+after :: Int -> IO UTCTime
+after d = threadDelay d >> getCurrentTime
 
 fromMsg :: UDP.Message -> Event
 fromMsg raw = Event { eventHost = To $ show $ UDP.msgSender raw
@@ -162,8 +197,8 @@ makeStore = do
     mems <- newTVarIO Map.empty
     -- num <- newTVarIO 0
     events <- newTVarIO []
-    seqNo <- newCounter 0
-    inc <- newCounter 0
+    seqNo <- newTVarIO 0
+    inc <- newTVarIO 0
     let store = Store { storeSeqNo = seqNo
                       , storeIncarnation = inc
                       , storeMembers = mems
@@ -180,19 +215,109 @@ dumpEvents s = do
     events <- atomically $ readTVar $ storeEvents s
     mapM_ print events
 
--- sendAndReceiveState :: State -> Socket -> IO Either Error ()
--- sendAndReceiveState state socket =
+-- TODO: Message s/b Dead -- this ADT has caused me many problems and this is not ex
+deadNode :: Store -> Message -> IO ()
+deadNode s (Dead incarnation node from) = atomically $ do
+  members <- readTVar $ storeMembers s
+  let currMember = Map.lookup node members
+  currInc <- readTVar $ storeIncarnation s
 
--- sendAndReceiveState :: State -> Socket -> IO Either Error ()
---  1. connect to remote swim node | error
---  2. send our state | error
---  3. receive state | timeout | error
---  4. error if not push/pull
---  5. readRemoteState
+  let x = case currMember of
+        Just m ->
+          if ignore m then
+            return ()
+          else
+            return ()
+        Nothing -> return ()
+  x
+  where ignore m = memberName m == node || incarnation < memberIncarnation m || memberAlive m == IsDead
 
 -- gossip/schedule
+waitForAckOf :: Int -> AckChan -> IO ()
+waitForAckOf seqNo' ackChan =
+  sourceTMChan ackChan $$ ackOf (fromIntegral seqNo') =$ CC.sinkNull >> return ()
+  where
+    ackOf s = awaitForever $ \ackSeqNo ->
+      if s == ackSeqNo then return () else ackOf s
 
--- probe
+membersAndSelf :: Store -> STM (Member, [Member])
+membersAndSelf s =
+  readTVar $ storeMembers s >>= (\ms -> return (storeSelf s, Map.elems ms))
+
+-- TODO: solve the expression problem of our Message type: we want Suspect msg here
+suspectNode :: Store -> Int -> String -> IO (Maybe Message)
+suspectNode s i name = atomically $ do
+  (self, members) <- membersAndSelf s
+  currInc <- readTVar $ storeIncarnation s
+
+  case find ((== name) . memberName) members of
+    -- ignore old incarnation or non-alive
+    Just m | currInc < i || notAlive m -> return Nothing
+
+    -- no cluster, we're not suspect. refute it.
+    Just m | name == memberName self -> do
+               -- update member state for new Incarnation
+               i' <- nextIncarnation' s $ memberIncarnation m
+               let m' = m { memberIncarnation = i' }
+               _ <- saveMember m'
+
+               -- return so we don't mark ourselves suspect
+               return $ Just Alive { incarnation = i'
+                                   , node = name
+                                   , fromAddr = 1 :: Word32 -- (memberHost m)
+                                   , port = 1 :: Word16
+                                   , version = [] }
+    -- broadcast
+    Just m -> do
+      markSuspect m
+      return $ Just Suspect { incarnation = i, node = name }
+
+    -- we don't know you, yo
+    Nothing -> return Nothing
+
+  where
+    saveMember m = modifyTVar (Map.insert (memberName m) m) (storeMembers s)
+
+    markSuspect m = undefined
+      -- let memberIncarnation = 
+      -- writeTVar (storeIncarnation s)
+      --          let updateMember m alive = m { memberAlive = alive }
+      --          updateMember m 
+      --          m = { }
+
+probeNode :: Config -> Store -> Member -> AckChan -> ConduitM AckResponse Message IO ()
+probeNode cfg s m ackChan = do
+  seqNo' <- liftIO $ nextSeqNo s
+  yield Ping { seqNo = fromIntegral seqNo', node = show m }
+  ack <- liftIO $ race (after $ seconds 5) (waitForAckOf seqNo' ackChan)
+
+  case ack of
+    -- received Ack so we're happy!
+    Right _ -> return ()
+
+    -- send IndirectPing to kRandomNodes
+    Left _ -> do
+      let indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo', fromAddr = 1 :: Word32, node = "wat" }
+      randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
+      mapM_ (yield . indirectPing) randomNodes
+      ack <- liftIO $ race (after $ seconds 5) (waitForAckOf seqNo' ackChan)
+      _ <- mapLeft (const $ suspectNode s (memberIncarnation m) (memberName m)) ack
+      return ()
+
+failureDetector :: Config -> Store -> IO ()
+failureDetector cfg s =
+    loop
+  where
+    d = 5
+    loop = do
+        _ <- threadDelay d >> getCurrentTime
+        nodes <- atomically $ readTVar $ storeMembers s
+        -- TODO: exclude ourselves via cfg
+        randomNodes <- kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
+        --mapM_ (const $ probeNode s) randomNodes
+        -- probe probeNodes
+        -- yield Ping { seqNo = 1, node = "wat" }
+        loop
 
 blah = do
     store <- makeStore

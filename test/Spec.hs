@@ -3,18 +3,17 @@ import           Types
 
 import           Control.Concurrent.STM ( atomically )
 import           Control.Concurrent.STM.TVar ( newTVarIO, writeTVar, modifyTVar, swapTVar, readTVar )
-import           Data.Atomics.Counter ( newCounter )
+import           Data.Bits (shiftL, (.|.))
 import qualified Data.ByteString as BS (ByteString(..), drop, pack, unpack, singleton, append)
 import qualified Data.ByteString.Char8 as C8 (pack)
 import           Data.Conduit
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Network.UDP    as UDP ( Message(..), msgSender
                                                     , sourceSocket, sinkToSocket )
-import           Data.Time.Clock             ( UTCTime(..), getCurrentTime )
-import           Data.Time.Calendar             ( Day(ModifiedJulianDay) )
+import           Data.Foldable ( foldl' )
 import qualified Data.Map.Strict as Map
-import           Data.Foldable               ( foldl' )
-import Data.Bits (shiftL, (.|.))
+import           Data.Time.Calendar ( Day(ModifiedJulianDay) )
+import           Data.Time.Clock ( UTCTime(..), getCurrentTime )
 import           Data.Word ( Word16, Word32, Word8 )
 import           Network.Socket.Internal ( SockAddr(SockAddrInet) )
 import           Test.Hspec
@@ -28,6 +27,7 @@ withStore :: (Store -> IO ()) -> IO ()
 withStore f = Core.makeStore >>= f
 
 zeroTime = UTCTime (ModifiedJulianDay 0) 0
+
 
 makeMembers :: [Member]
 makeMembers =

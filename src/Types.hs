@@ -1,22 +1,18 @@
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RecordWildCards #-}
-
 module Types where
 
 import           Control.Concurrent.STM.TVar
-import           Data.Aeson (FromJSON, ToJSON)
 import           Data.Aeson.Types
-import           Data.Atomics.Counter ( AtomicCounter )
 import           Data.ByteString ( ByteString )
-import qualified Data.Conduit.Network.UDP    as UDP ( Message(..) )
+import qualified Data.Conduit.Network.UDP as UDP ( Message(..) )
+import           Data.Conduit.TMChan (TMChan(..))
 import           Data.Foldable (asum)
 import           Data.List.NonEmpty ( NonEmpty(..) )
 import qualified Data.Map.Strict as Map
-import           Data.Monoid                 ( (<>) )
+import           Data.Monoid ( (<>) )
 import           Data.Time.Clock ( UTCTime(..) )
 import           Data.Word ( Word16, Word32, Word8 )
-import           GHC.Generics
-import           Network.Socket ( HostAddress )
 
 type Error = String
 
@@ -27,6 +23,7 @@ data Config = Config { bindHost :: String
                      , joinHost :: String
                      , configJoinHosts :: NonEmpty String
                      , configUDPBufferSize :: Int
+                     , cfgGossipNodes :: Int
                      }
 
 -- Member
@@ -46,10 +43,11 @@ data Event = Event { eventHost :: EventHost
                    , eventBody :: ByteString
                    } deriving (Show, Eq)
 
-data Store = Store { storeSeqNo :: AtomicCounter
-                   , storeIncarnation :: AtomicCounter
+data Store = Store { storeSeqNo :: TVar Int
+                   , storeIncarnation :: TVar Int
                    -- , storeNumMembers :: TVar Int -- estimate, aka known unknown, of members
                    , storeMembers :: TVar (Map.Map String Member) -- known known of members
+                   , storeSelf :: Member
                    , storeEvents :: TVar [Event] -- event log
                    }
 
@@ -85,6 +83,14 @@ data Message = Ping { seqNo :: Word32
              | Compound ByteString
     deriving (Eq, Show)
 
+data InternalMessage = Gossip [Member] | Nada
+
+newtype AckResponse = AckResponse Word32
+
+type AckChan = TMChan Word32
+
+data GodMessage = Message | InternalMessage
+
 msgIndex :: Num a => Message -> a
 msgIndex m = case m of
   Ping{..} -> 0
@@ -93,6 +99,7 @@ msgIndex m = case m of
   Suspect{..} -> 3
   Alive{..} -> 4
   Dead{..} -> 5
+
   Compound _ -> 6
 
 instance FromJSON Message where
