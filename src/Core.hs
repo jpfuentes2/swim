@@ -25,6 +25,7 @@ import           Data.Conduit.Network (sinkSocket)
 import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
 import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
                                                      sinkToSocket, sourceSocket)
+import           Data.Maybe (fromMaybe)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
 import           Data.Foldable (find)
@@ -53,6 +54,9 @@ encode = toStrict . packAeson
 
 isAlive :: Member -> Bool
 isAlive = (== IsAlive) . memberAlive
+
+isDead :: Member -> Bool
+isDead = (== IsDead) . memberAlive
 
 notAlive :: Member -> Bool
 notAlive = not . isAlive
@@ -192,8 +196,8 @@ getSocketUDP' host port = do
     NS.bind sock addr
     return sock
 
-makeStore :: IO Store
-makeStore = do
+makeStore :: Member -> IO Store
+makeStore self = do
     mems <- newTVarIO Map.empty
     -- num <- newTVarIO 0
     events <- newTVarIO []
@@ -203,6 +207,7 @@ makeStore = do
                       , storeIncarnation = inc
                       , storeMembers = mems
                       , storeEvents = events
+                      , storeSelf = self
                       -- , storeNumMembers = num
                       }
     return store
@@ -215,23 +220,6 @@ dumpEvents s = do
     events <- atomically $ readTVar $ storeEvents s
     mapM_ print events
 
--- TODO: Message s/b Dead -- this ADT has caused me many problems and this is not ex
-deadNode :: Store -> Message -> IO ()
-deadNode s (Dead incarnation node from) = atomically $ do
-  members <- readTVar $ storeMembers s
-  let currMember = Map.lookup node members
-  currInc <- readTVar $ storeIncarnation s
-
-  let x = case currMember of
-        Just m ->
-          if ignore m then
-            return ()
-          else
-            return ()
-        Nothing -> return ()
-  x
-  where ignore m = memberName m == node || incarnation < memberIncarnation m || memberAlive m == IsDead
-
 -- gossip/schedule
 waitForAckOf :: Int -> AckChan -> IO ()
 waitForAckOf seqNo' ackChan =
@@ -241,25 +229,30 @@ waitForAckOf seqNo' ackChan =
       if s == ackSeqNo then return () else ackOf s
 
 membersAndSelf :: Store -> STM (Member, [Member])
-membersAndSelf s =
-  readTVar $ storeMembers s >>= (\ms -> return (storeSelf s, Map.elems ms))
+membersAndSelf s = do
+  ms <- readTVar $ storeMembers s
+  return (storeSelf s, Map.elems ms)
 
+-- TODO: need a timer to mark this node as dead after suspect timeout
 -- TODO: solve the expression problem of our Message type: we want Suspect msg here
-suspectNode :: Store -> Int -> String -> IO (Maybe Message)
-suspectNode s i name = atomically $ do
-  (self, members) <- membersAndSelf s
-  currInc <- readTVar $ storeIncarnation s
+suspectNode :: Store -> Message -> IO (Maybe Message)
+suspectNode s msg@(Suspect incarnation name) = do
+  (self, members) <- atomically $ membersAndSelf s
 
   case find ((== name) . memberName) members of
+    -- we don't know this node. ignore.
+    Nothing -> return Nothing
+
     -- ignore old incarnation or non-alive
-    Just m | currInc < i || notAlive m -> return Nothing
+    Just m | incarnation < memberIncarnation m || notAlive m -> return Nothing
 
     -- no cluster, we're not suspect. refute it.
     Just m | name == memberName self -> do
                -- update member state for new Incarnation
-               i' <- nextIncarnation' s $ memberIncarnation m
-               let m' = m { memberIncarnation = i' }
-               _ <- saveMember m'
+               i' <- atomically $ do
+                 nextInc <- nextIncarnation' s $ memberIncarnation m
+                 let m' = m { memberIncarnation = nextInc }
+                 saveMember m' >> return nextInc
 
                -- return so we don't mark ourselves suspect
                return $ Just Alive { incarnation = i'
@@ -267,23 +260,64 @@ suspectNode s i name = atomically $ do
                                    , fromAddr = 1 :: Word32 -- (memberHost m)
                                    , port = 1 :: Word16
                                    , version = [] }
+
     -- broadcast
     Just m -> do
-      markSuspect m
-      return $ Just Suspect { incarnation = i, node = name }
-
-    -- we don't know you, yo
-    Nothing -> return Nothing
+      now <- getCurrentTime
+      _ <- atomically $ markSuspect m now
+      return $ Just msg
 
   where
-    saveMember m = modifyTVar (Map.insert (memberName m) m) (storeMembers s)
+    saveMember m = modifyTVar (storeMembers s) $ Map.insert (memberName m) m
 
-    markSuspect m = undefined
-      -- let memberIncarnation = 
-      -- writeTVar (storeIncarnation s)
-      --          let updateMember m alive = m { memberAlive = alive }
-      --          updateMember m 
-      --          m = { }
+    -- TODO: not a fan of passing in time here
+    markSuspect m time = do
+      let m' = m { memberIncarnation = incarnation
+                 , memberAlive = IsSuspect
+                 , memberLastChange = time }
+      void $ saveMember m'
+
+-- TODO: Message s/b Dead -- this ADT has caused me many problems and this is not ex
+deadNode :: Store -> Message -> IO (Maybe Message)
+deadNode s msg@(Dead incarnation name from) = do
+  (self, members) <- atomically $ membersAndSelf s
+
+  case find ((== name) . memberName) members of
+    -- we don't know this node. ignore.
+    Nothing -> return Nothing
+
+    -- ignore old incarnation or already dead
+    Just m | incarnation < memberIncarnation m || isDead m -> return Nothing
+
+    -- no cluster, we're not dead. refute it.
+    Just m | name == memberName self -> do
+               i' <- atomically $ do
+                 nextInc <- nextIncarnation' s $ memberIncarnation m
+                 let m' = m { memberIncarnation = nextInc }
+                 saveMember m' >> return nextInc
+
+               -- return so we don't mark ourselves suspect
+               return $ Just Alive { incarnation = i'
+                                   , node = name
+                                   , fromAddr = 1 :: Word32 -- (memberHost m)
+                                   , port = 1 :: Word16
+                                   , version = [] }
+
+    -- broadcast
+    Just m -> do
+      now <- getCurrentTime
+      _ <- atomically $ markDead m now
+      return $ Just msg
+
+  where
+    saveMember m = modifyTVar (storeMembers s) $ Map.insert (memberName m) m
+
+    -- TODO: not a fan of passing in time here
+    markDead m time = do
+      let m' = m { memberIncarnation = incarnation
+                 , memberAlive = IsDead
+                 , memberLastChange = time }
+      void $ saveMember m'
 
 probeNode :: Config -> Store -> Member -> AckChan -> ConduitM AckResponse Message IO ()
 probeNode cfg s m ackChan = do
@@ -301,8 +335,13 @@ probeNode cfg s m ackChan = do
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes
       ack <- liftIO $ race (after $ seconds 5) (waitForAckOf seqNo' ackChan)
-      _ <- mapLeft (const $ suspectNode s (memberIncarnation m) (memberName m)) ack
-      return ()
+      case ack of
+        -- broadcast possible suspect msg
+        Left _ -> do
+          suspect <- liftIO $ suspectNode s $ Suspect (memberIncarnation m) (memberName m)
+          maybe (return ()) (void . yield) suspect
+
+        Right _ -> return ()
 
 failureDetector :: Config -> Store -> IO ()
 failureDetector cfg s =
@@ -312,15 +351,21 @@ failureDetector cfg s =
     loop = do
         _ <- threadDelay d >> getCurrentTime
         nodes <- atomically $ readTVar $ storeMembers s
+
         -- TODO: exclude ourselves via cfg
         randomNodes <- kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
-        --mapM_ (const $ probeNode s) randomNodes
-        -- probe probeNodes
-        -- yield Ping { seqNo = 1, node = "wat" }
         loop
 
 blah = do
-    store <- makeStore
+    now <- getCurrentTime
+    let self = Member { memberName = "myself"
+                      , memberHost = "localhost"
+                      , memberAlive = IsAlive
+                      , memberIncarnation = 0
+                      , memberLastChange = now
+                      }
+
+    store <- makeStore self
     -- sendAndReceiveState
     withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
       installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
