@@ -101,16 +101,14 @@ aliveMembers :: [Member] -> [Member]
 aliveMembers = filter ((== IsAlive) . memberAlive)
 
 removeDeadNodes :: Store -> IO ()
-removeDeadNodes s = atomically $ do
-    mems <- readTVar $ storeMembers s
-    _ <- swapTVar (storeMembers s) $ Map.filter ((/= IsDead) . memberAlive) mems
-    return ()
+removeDeadNodes s =
+  atomically $ void $ modifyTVar (storeMembers s) $ Map.filter ((/= IsDead) . memberAlive)
 
 -- gives kRandomNodes excluding our own host from the list
 kRandomNodesExcludingSelf :: Config -> Store -> IO [Member]
 kRandomNodesExcludingSelf cfg s = do
-  nodes <- liftIO $ atomically $ readTVar $ storeMembers s
-  liftIO $ kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
+  nodes <- atomically $ readTVar $ storeMembers s
+  kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
 
 -- select up to k random nodes, excluding a given
 -- node and any non-alive nodes. It is possible that less than k nodes are returned.
@@ -125,13 +123,6 @@ shuffle xs = do
     randomPosition <- getStdRandom (randomR (0, length xs - 1))
     let (left, a : right) = splitAt randomPosition xs
     fmap (a :) (shuffle (left ++ right))
-
-every' :: Int -> Producer IO UTCTime
-every' d = loop
-  where
-    loop = do
-        t <- liftIO $ threadDelay d >> getCurrentTime
-        yield t >> loop
 
 after :: Int -> IO UTCTime
 after d = threadDelay d >> getCurrentTime
@@ -323,8 +314,10 @@ failureDetector cfg s =
         _ <- threadDelay d >> getCurrentTime
         nodes <- atomically $ readTVar $ storeMembers s
 
-        -- TODO: exclude ourselves via cfg
-        randomNodes <- kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
+        -- exclude self from list of nodes to probe
+        randomNodes <- kRandomNodes (cfgGossipNodes cfg) [storeSelf s] (Map.elems nodes)
+
+        -- TODO: plug in probeNode
         loop
 
 blah = do
