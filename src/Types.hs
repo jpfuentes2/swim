@@ -99,6 +99,7 @@ msgIndex m = case m of
   Suspect{..} -> 3
   Alive{..} -> 4
   Dead{..} -> 5
+
   Compound _ -> 6
 
 instance FromJSON Message where

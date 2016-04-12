@@ -235,8 +235,9 @@ membersAndSelf s = do
 
 -- TODO: need a timer to mark this node as dead after suspect timeout
 -- TODO: solve the expression problem of our Message type: we want Suspect msg here
-suspectNode :: Store -> Message -> IO (Maybe Message)
-suspectNode s msg@(Suspect incarnation name) = do
+suspectOrDeadNode' :: Store -> Message -> String -> Int -> Liveness -> IO (Maybe Message)
+suspectOrDeadNode' s msg _ _ IsAlive = undefined
+suspectOrDeadNode' s msg name incarnation suspectOrDead = do
   (self, members) <- atomically $ membersAndSelf s
 
   case find ((== name) . memberName) members of
@@ -244,80 +245,50 @@ suspectNode s msg@(Suspect incarnation name) = do
     Nothing -> return Nothing
 
     -- ignore old incarnation or non-alive
-    Just m | incarnation < memberIncarnation m || notAlive m -> return Nothing
+    Just m | incarnation < memberIncarnation m || livenessCheck m -> return Nothing
 
-    -- no cluster, we're not suspect. refute it.
+    -- no cluster, we're not suspect/dead. refute it.
     Just m | name == memberName self -> do
-               -- update member state for new Incarnation
                i' <- atomically $ do
                  nextInc <- nextIncarnation' s $ memberIncarnation m
                  let m' = m { memberIncarnation = nextInc }
                  saveMember m' >> return nextInc
 
-               -- return so we don't mark ourselves suspect
+               -- return so we don't mark ourselves suspect/dead
                return $ Just Alive { incarnation = i'
                                    , node = name
                                    , fromAddr = 1 :: Word32 -- (memberHost m)
                                    , port = 1 :: Word16
                                    , version = [] }
 
-    -- broadcast
+    -- broadcast suspect/dead msg
     Just m -> do
       now <- getCurrentTime
-      _ <- atomically $ markSuspect m now
+      _ <- atomically $ do
+        let m' = m { memberIncarnation = incarnation
+                   , memberAlive = suspectOrDead
+                   , memberLastChange = now }
+        void $ saveMember m'
+
       return $ Just msg
 
   where
-    saveMember m = modifyTVar (storeMembers s) $ Map.insert (memberName m) m
+    livenessCheck m = case suspectOrDead of
+      IsAlive -> undefined
+      IsSuspect -> memberAlive m /= IsAlive
+      IsDead -> memberAlive m == IsDead
 
-    -- TODO: not a fan of passing in time here
-    markSuspect m time = do
-      let m' = m { memberIncarnation = incarnation
-                 , memberAlive = IsSuspect
-                 , memberLastChange = time }
-      void $ saveMember m'
+    -- name = case msg of
+    saveMember m =
+      modifyTVar (storeMembers s) $ Map.insert (memberName m) m
 
--- TODO: Message s/b Dead -- this ADT has caused me many problems and this is not ex
+suspectNode :: Store -> Message -> IO (Maybe Message)
+suspectNode s msg@(Suspect i name) = suspectOrDeadNode' s msg name i IsSuspect
+suspectNode s _ = undefined
+
 deadNode :: Store -> Message -> IO (Maybe Message)
-deadNode s msg@(Dead incarnation name from) = do
-  (self, members) <- atomically $ membersAndSelf s
-
-  case find ((== name) . memberName) members of
-    -- we don't know this node. ignore.
-    Nothing -> return Nothing
-
-    -- ignore old incarnation or already dead
-    Just m | incarnation < memberIncarnation m || isDead m -> return Nothing
-
-    -- no cluster, we're not dead. refute it.
-    Just m | name == memberName self -> do
-               i' <- atomically $ do
-                 nextInc <- nextIncarnation' s $ memberIncarnation m
-                 let m' = m { memberIncarnation = nextInc }
-                 saveMember m' >> return nextInc
-
-               -- return so we don't mark ourselves suspect
-               return $ Just Alive { incarnation = i'
-                                   , node = name
-                                   , fromAddr = 1 :: Word32 -- (memberHost m)
-                                   , port = 1 :: Word16
-                                   , version = [] }
-
-    -- broadcast
-    Just m -> do
-      now <- getCurrentTime
-      _ <- atomically $ markDead m now
-      return $ Just msg
-
-  where
-    saveMember m = modifyTVar (storeMembers s) $ Map.insert (memberName m) m
-
-    -- TODO: not a fan of passing in time here
-    markDead m time = do
-      let m' = m { memberIncarnation = incarnation
-                 , memberAlive = IsDead
-                 , memberLastChange = time }
-      void $ saveMember m'
+deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
+deadNode s _ = undefined
 
 probeNode :: Config -> Store -> Member -> AckChan -> ConduitM AckResponse Message IO ()
 probeNode cfg s m ackChan = do
