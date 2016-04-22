@@ -8,14 +8,17 @@ import qualified Data.ByteString as BS (ByteString(..), drop, pack, unpack, sing
 import qualified Data.ByteString.Char8 as C8 (pack)
 import           Data.Conduit
 import qualified Data.Conduit.List as CL
+import Data.List (sort)
 import qualified Data.Conduit.Network.UDP    as UDP ( Message(..), msgSender
                                                     , sourceSocket, sinkToSocket )
+import           Data.Monoid ( (<>) )
 import           Data.Foldable ( foldl' )
 import qualified Data.Map.Strict as Map
 import           Data.Time.Calendar ( Day(ModifiedJulianDay) )
 import           Data.Time.Clock ( UTCTime(..), getCurrentTime )
 import           Data.Word ( Word16, Word32, Word8 )
 import           Network.Socket.Internal ( SockAddr(SockAddrInet) )
+import           Data.Foldable (find)
 import           Test.Hspec
 
 fromOctets :: [Word8] -> Word32
@@ -23,11 +26,25 @@ fromOctets = foldl' accum 0
   where
     accum a o = (a `shiftL` 8) .|. fromIntegral o
 
+selfMember :: IO Member
+selfMember = do
+    now <- getCurrentTime
+    return Member { memberName = "test"
+                  , memberHost = "localhost"
+                  , memberAlive = IsAlive
+                  , memberIncarnation = 0
+                  , memberLastChange = now
+                  }
+
+config :: Config
+config = case Core.parseConfig of
+  Right cfg -> cfg
+  Left _ -> undefined
+
 withStore :: (Store -> IO ()) -> IO ()
-withStore f = Core.makeStore >>= f
+withStore f = selfMember >>= Core.makeStore >>= f
 
 zeroTime = UTCTime (ModifiedJulianDay 0) 0
-
 
 makeMembers :: [Member]
 makeMembers =
@@ -95,6 +112,26 @@ main = hspec $ do
 
       Map.notMember "dead" mems' `shouldBe` True
       Map.size mems' `shouldBe` 2
+
+  describe "Core.membersAndSelf" $
+    it "gives self fst and everyone else snd" $ withStore $ \s -> do
+      let (self, mems) = (storeSelf s, makeMembers)
+      _ <- atomically $ swapTVar (storeMembers s) $ membersMap (mems <> [self])
+
+      (self', mems') <- atomically $ Core.membersAndSelf s
+
+      self `shouldBe` self'
+      find (== self) mems' `shouldBe` Nothing
+      sort mems `shouldBe` sort mems'
+
+  describe "Core.kRandomNodesExcludingSelf" $
+    it "excludes self" $ withStore $ \s -> do
+      let self = storeSelf s
+      _ <- atomically $ swapTVar (storeMembers s) $ membersMap (makeMembers <> [self])
+
+      mems <- Core.kRandomNodesExcludingSelf config s
+      find (== self) mems `shouldBe` Nothing
+      length mems `shouldBe` 3
 
   describe "Core.kRandomNodes" $ do
     let ms = makeMembers

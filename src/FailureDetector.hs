@@ -1,7 +1,5 @@
-{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-{-# LANGUAGE TupleSections     #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module FailureDetector where
 
@@ -10,7 +8,6 @@ import           Control.Concurrent.Async (race)
 import           Control.Concurrent.STM (atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Monad.IO.Class (MonadIO (liftIO))
-import           Control.Monad.Identity (void)
 import           Data.Conduit
 import           Data.Foldable (find)
 import qualified Data.Map.Strict as Map (elems, insert)
@@ -51,7 +48,7 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
         let m' = m { memberIncarnation = i
                    , memberAlive = suspectOrDead
                    , memberLastChange = now }
-        void $ saveMember m'
+        saveMember m'
 
       return $ Just msg
 
@@ -74,13 +71,11 @@ deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
 deadNode _ _ = undefined
 
 probeNode :: Config -> Store -> Member -> AckChan -> ConduitM AckResponse Message IO ()
-probeNode cfg s m ackChan = do
-  seqNo' <- liftIO $ nextSeqNo s
+probeNode cfg s m chan@(AckChan _ seqNo') = do
   yield Ping { seqNo = fromIntegral seqNo', node = show m }
-  ack <- liftIO $ race (after $ seconds 5) (waitForAckOf seqNo' ackChan)
+  ack <- liftIO $ race (after $ seconds 5) $ waitForAckOf chan
 
   case ack of
-    -- received Ack so we're happy!
     Right _ -> return ()
 
     -- send IndirectPing to kRandomNodes
@@ -88,13 +83,13 @@ probeNode cfg s m ackChan = do
       let indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo', fromAddr = 1 :: Word32, node = "wat" }
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes
-      ack <- liftIO $ race (after $ seconds 5) (waitForAckOf seqNo' ackChan)
+      ack <- liftIO $ race (after $ seconds 5) $ waitForAckOf chan
 
       case ack of
         -- broadcast possible suspect msg
         Left _ -> do
           suspect <- liftIO $ suspectNode s $ Suspect (memberIncarnation m) (memberName m)
-          maybe (return ()) (void . yield) suspect
+          maybe (return ()) yield suspect
 
         Right _ -> return ()
 
@@ -102,13 +97,13 @@ failureDetector :: Config -> Store -> IO ()
 failureDetector cfg s =
     loop
   where
-    d = 5
     loop = do
-        _ <- threadDelay d >> getCurrentTime
-        nodes <- atomically $ readTVar $ storeMembers s
+        _ <- threadDelay 500000 >> getCurrentTime
+        members <- kRandomNodesExcludingSelf cfg s
 
-        -- exclude self from list of nodes to probe
-        randomNodes <- kRandomNodes (cfgGossipNodes cfg) [storeSelf s] (Map.elems nodes)
+        -- mapM_ (\node -> do
+        --                 chan <- 
+        --                 probeNode cfg s node  randomNodes
 
         -- TODO: plug in probeNode
         loop

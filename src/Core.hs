@@ -1,7 +1,4 @@
-{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-{-# LANGUAGE TupleSections     #-}
 
 module Core where
 
@@ -97,18 +94,20 @@ nextIncarnation' s n = do
   else
      writeTVar (storeIncarnation s) inc' >> return inc'
 
+
 aliveMembers :: [Member] -> [Member]
-aliveMembers = filter ((== IsAlive) . memberAlive)
+aliveMembers = filter isAlive
 
 removeDeadNodes :: Store -> IO ()
 removeDeadNodes s =
-  atomically $ void $ modifyTVar (storeMembers s) $ Map.filter ((/= IsDead) . memberAlive)
+  atomically $ modifyTVar (storeMembers s) $ Map.filter (not . isDead)
 
 -- gives kRandomNodes excluding our own host from the list
 kRandomNodesExcludingSelf :: Config -> Store -> IO [Member]
 kRandomNodesExcludingSelf cfg s = do
   nodes <- atomically $ readTVar $ storeMembers s
-  kRandomNodes (cfgGossipNodes cfg) [] (Map.elems nodes)
+  let self = storeSelf s
+  kRandomNodes (cfgGossipNodes cfg) [] (filter (/= self) $ Map.elems nodes)
 
 -- select up to k random nodes, excluding a given
 -- node and any non-alive nodes. It is possible that less than k nodes are returned.
@@ -117,15 +116,16 @@ kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
 
+-- Fisher-Yates shuffle
 shuffle :: [a] -> IO [a]
 shuffle [] = return []
-shuffle xs = do
-    randomPosition <- getStdRandom (randomR (0, length xs - 1))
-    let (left, a : right) = splitAt randomPosition xs
-    fmap (a :) (shuffle (left ++ right))
+shuffle as = do
+  rand <- getStdRandom $ randomR (0, length as - 1) -- [0, n)
+  let (left, a:right) = splitAt rand as
+  (a:) <$> shuffle (left <> right)
 
 after :: Int -> IO UTCTime
-after d = threadDelay d >> getCurrentTime
+after = return getCurrentTime . threadDelay
 
 fromMsg :: UDP.Message -> Event
 fromMsg raw = Event { eventHost = To $ show $ UDP.msgSender raw
@@ -176,16 +176,14 @@ handleMessage store = awaitForever $ \r ->
     recordEvents es = liftIO . atomically $ modifyTVar events (es <>)
 
     respond inc (Just (out, udp)) = recordEvents [ inc, out ] >> yield udp
-    respond inc Nothing = void $ recordEvents [ inc ]
+    respond inc Nothing = recordEvents [ inc ]
 
 getSocketUDP' :: String -> Int -> IO Socket
 getSocketUDP' host port = do
     (sock, info) <- getSocketUDP host port
-    let addr = addrAddress info
     -- reuse since hashicorp/memberlist seems to want us to use same port
     setSocketOption sock ReuseAddr 1
-    NS.bind sock addr
-    return sock
+    NS.bind sock (addrAddress info) >> return sock
 
 makeStore :: Member -> IO Store
 makeStore self = do
@@ -212,17 +210,20 @@ dumpEvents s = do
     mapM_ print events
 
 -- gossip/schedule
-waitForAckOf :: Int -> AckChan -> IO ()
-waitForAckOf seqNo' ackChan =
-  sourceTMChan ackChan $$ ackOf (fromIntegral seqNo') =$ CC.sinkNull >> return ()
+waitForAckOf :: AckChan -> IO ()
+waitForAckOf (AckChan chan seqNo') =
+  sourceTMChan chan $$ ackOf (fromIntegral seqNo') =$ CC.sinkNull >> return ()
   where
     ackOf s = awaitForever $ \ackSeqNo ->
       if s == ackSeqNo then return () else ackOf s
 
+members :: Store -> STM [Member]
+members s = Map.elems <$> readTVar (storeMembers s)
+
 membersAndSelf :: Store -> STM (Member, [Member])
-membersAndSelf s = do
-  ms <- readTVar $ storeMembers s
-  return (storeSelf s, Map.elems ms)
+membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
+  where
+    self = storeSelf s
 
 blah = do
     now <- getCurrentTime
@@ -232,9 +233,9 @@ blah = do
                       , memberIncarnation = 0
                       , memberLastChange = now
                       }
-
     store <- makeStore self
+    installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
+
     -- sendAndReceiveState
     withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
-      installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
       UDP.sourceSocket udpSocket 65336 $$ handleMessage store $= UDP.sinkToSocket udpSocket

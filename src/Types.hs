@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RecordWildCards #-}
+
 module Types where
 
 import           Control.Concurrent.STM.TVar
@@ -35,6 +36,9 @@ data Member = Member { memberName        :: String
                      -- , memberMeta :: ByteString
                      }
     deriving (Show, Eq)
+
+instance Ord Member where
+  compare a b = compare (memberName a) (memberName b)
 
 data EventHost = To String | From String deriving (Show, Eq)
 
@@ -80,6 +84,10 @@ data Message = Ping { seqNo :: Word32
                     , node        :: String
                     , deadFrom        :: String
                     }
+             | PushPull { incarnation :: Int
+                    , node        :: String
+                    , deadFrom        :: String
+                    }
              | Compound ByteString
     deriving (Eq, Show)
 
@@ -87,7 +95,7 @@ data InternalMessage = Gossip [Member] | Nada
 
 newtype AckResponse = AckResponse Word32
 
-type AckChan = TMChan Word32
+data AckChan = AckChan (TMChan Word32) Word32
 
 data GodMessage = Message | InternalMessage
 
@@ -99,6 +107,7 @@ msgIndex m = case m of
   Suspect{..} -> 3
   Alive{..} -> 4
   Dead{..} -> 5
+  PushPull{..} -> 5
 
   Compound _ -> 6
 
@@ -141,5 +150,5 @@ instance ToJSON Message where
     "DeadFrom"  .= deadFrom ]
 
 instance Show UDP.Message where
-    show (UDP.Message msgData msgSender) =
-        "got msg: " <> show msgData <> " from: " <> show msgSender
+  show (UDP.Message msgData msgSender) =
+    "got msg: " <> show msgData <> " from: " <> show msgSender
