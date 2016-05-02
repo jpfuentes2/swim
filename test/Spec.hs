@@ -90,12 +90,25 @@ main = hspec $ do
 
         length res `shouldBe` 0
 
-  describe "encode and decode" $ do
+  describe "wire protocol" $ do
     it "encodes & decodes" $ do
       let ping = Ping { seqNo = 1, node = "a" }
           decoded = Core.decode $ Core.encode ping
 
       decoded `shouldBe` Right ping
+
+    it "encodes compound msgs" $ do
+      let ping1 = Ping { seqNo = 1, node = "a" }
+          ack1 = Ack { seqNo = 2, payload = [] }
+          ping2 = Ping { seqNo = 3, node = "b" }
+          ack2 = Ack { seqNo = 4, payload = [] }
+
+          msgs = [ping1, ack1, ping2, ack2]
+          encoded = Core.encodeCompound msgs
+
+      print encoded
+      Core.decodeCompound encoded `shouldBe` Right msgs
+      -- decoded `shouldBe` Right ping
 
     -- it "decodes external messages" $ do
     --   let ping = Ping { seqNo = 1, node = "jax-ruby" }

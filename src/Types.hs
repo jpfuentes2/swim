@@ -97,19 +97,26 @@ newtype AckResponse = AckResponse Word32
 
 data AckChan = AckChan (TMChan Word32) Word32
 
-data GodMessage = Message | InternalMessage
+data MsgType = PingMsg
+             | IndirectPingMsg
+             | AckMsg
+             | SuspectMsg
+             | AliveMsg
+             | DeadMsg
+             | PushPullMsg
+             | CompoundMsg
+             deriving (Eq, Show, Enum)
 
 msgIndex :: Num a => Message -> a
 msgIndex m = case m of
-  Ping{..} -> 0
-  IndirectPing{..} -> 1
-  Ack{..} -> 2
-  Suspect{..} -> 3
-  Alive{..} -> 4
-  Dead{..} -> 5
-  PushPull{..} -> 5
-
-  Compound _ -> 6
+  Ping{..} -> fromIntegral $ fromEnum PingMsg
+  IndirectPing{..} -> fromIntegral $ fromEnum IndirectPingMsg
+  Ack{..} -> fromIntegral $ fromEnum AckMsg
+  Suspect{..} -> fromIntegral $ fromEnum SuspectMsg
+  Alive{..} -> fromIntegral $ fromEnum AliveMsg
+  Dead{..} -> fromIntegral $ fromEnum DeadMsg
+  PushPull{..} -> fromIntegral $ fromEnum PushPullMsg
+  Compound _ -> fromIntegral $ fromEnum CompoundMsg
 
 instance FromJSON Message where
   parseJSON = withObject "message" $ \o -> asum [

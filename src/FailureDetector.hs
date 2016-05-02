@@ -70,10 +70,20 @@ deadNode :: Store -> Message -> IO (Maybe Message)
 deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
 deadNode _ _ = undefined
 
-probeNode :: Config -> Store -> Member -> AckChan -> ConduitM AckResponse Message IO ()
-probeNode cfg s m chan@(AckChan _ seqNo') = do
+type Timeout = ()
+type SeqNo = Word32
+type AckWaiter = IO (Either Timeout SeqNo)
+
+-- TODO: time to put self member into Store rather than Config
+probeNode :: Config ->
+             Store ->
+             Member ->
+             SeqNo ->
+             AckWaiter ->
+             ConduitM AckResponse Message IO ()
+probeNode cfg s m seqNo' ackWaiter = do
   yield Ping { seqNo = fromIntegral seqNo', node = show m }
-  ack <- liftIO $ race (after $ seconds 5) $ waitForAckOf chan
+  ack <- liftIO ackWaiter
 
   case ack of
     Right _ -> return ()
@@ -83,15 +93,15 @@ probeNode cfg s m chan@(AckChan _ seqNo') = do
       let indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo', fromAddr = 1 :: Word32, node = "wat" }
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes
-      ack <- liftIO $ race (after $ seconds 5) $ waitForAckOf chan
+      ack <- liftIO ackWaiter
 
       case ack of
+        Right _ -> return ()
+
         -- broadcast possible suspect msg
         Left _ -> do
           suspect <- liftIO $ suspectNode s $ Suspect (memberIncarnation m) (memberName m)
           maybe (return ()) yield suspect
-
-        Right _ -> return ()
 
 failureDetector :: Config -> Store -> IO ()
 failureDetector cfg s =
@@ -102,6 +112,9 @@ failureDetector cfg s =
         members <- kRandomNodesExcludingSelf cfg s
 
         -- mapM_ (\node -> do
+          -- make a seqNo'
+          -- make a chan for seqNo'
+          -- let ackWaiter = race (after $ seconds 5) $ waitForAckOf chan
         --                 chan <- 
         --                 probeNode cfg s node  randomNodes
 

@@ -1,4 +1,4 @@
 module Main where
 import qualified Core
 
-main = print "wat"
+main = Core.blah

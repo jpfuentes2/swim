@@ -5,7 +5,7 @@ module Core where
 import qualified Data.Aeson as Aeson (encode)
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 
-import           Control.Concurrent (threadDelay)
+import           Control.Concurrent (threadDelay, forkIO)
 import           Control.Concurrent.Async (race)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
@@ -13,8 +13,9 @@ import           Control.Exception.Base (bracket)
 import           Control.Monad.Identity
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Trans.Class (lift)
-import qualified Data.ByteString             as BS (ByteString, drop, empty,
-                                                    take, unpack)
+import qualified Data.ByteString             as BS (ByteString, null, append, concat, drop, empty,
+                                                    take, pack, unpack, length, uncons)
+import qualified Data.ByteString.Builder     as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
 import           Data.Conduit
 import qualified Data.Conduit.Combinators as CC (map, omapE, print, stdout, sinkNull)
@@ -22,6 +23,7 @@ import           Data.Conduit.Network (sinkSocket)
 import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
 import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
                                                      sinkToSocket, sourceSocket)
+import Data.Conduit.Network  (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
 import           Data.Maybe (fromMaybe)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
@@ -31,7 +33,7 @@ import qualified Data.Map.Strict             as Map (elems, empty, filter,
                                                      lookup, insert)
 import           Data.Word ( Word16, Word32, Word8 )
 import           Data.Monoid ((<>))
-import           Data.Streaming.Network (getSocketUDP)
+import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
 import           Data.Time.Clock (UTCTime (..), getCurrentTime)
 import           Network.Socket as NS
 import           Network.Socket.Internal     (HostAddress,
@@ -46,9 +48,6 @@ type Second = Int
 seconds :: Int -> Second
 seconds i = i * 1000000
 
-encode :: Message -> BS.ByteString
-encode = toStrict . packAeson
-
 isAlive :: Member -> Bool
 isAlive = (== IsAlive) . memberAlive
 
@@ -58,10 +57,40 @@ isDead = (== IsDead) . memberAlive
 notAlive :: Member -> Bool
 notAlive = not . isAlive
 
+toWord8 :: Int -> Word8
+toWord8 n = fromIntegral n :: Word8
+
+toWord16 :: Int -> Word16
+toWord16 n = fromIntegral n :: Word16
+
+encode :: Message -> BS.ByteString
+encode = toStrict . packAeson
+
+-- TODO: reduce list traversal please
+-- | msg type | num msgs | len of each msg |
+-- |---------------------------------------|
+-- |                body                   |
+encodeCompound :: [Message] -> BS.ByteString
+encodeCompound msgs =
+  let (msgIdx, numMsgs) = (toWord8 $ fromEnum CompoundMsg, toWord8 $ length msgs)
+      encoded = map encode msgs
+      msgLengths = foldl (\b msg -> b <> BSB.word16BE (toWord16 $ BS.length msg)) mempty encoded
+      header = BS.pack [msgIdx, numMsgs] <> toStrict (BSB.toLazyByteString msgLengths)
+  in BS.append header $ BS.concat encoded
+
 decode :: BS.ByteString -> Either Error Message
-decode bs = maybe (Left $ "Could not parse " <> show bs) Right unpacked
-  where
-    unpacked = unpackAeson $ fromStrict bs
+decode bs = maybe err Right (unpackAeson $ fromStrict bs)
+  where err = Left $ "Could not parse " <> show bs
+
+decodeCompound :: BS.ByteString -> Either Error [Message]
+decodeCompound bs = do
+  (numMsgs, rest) <- maybe (Left "missing compound length byte") Right $ BS.uncons bs
+  _ <- if BS.length rest < fromIntegral numMsgs * 2 then
+         Left "compound message is truncated"
+       else
+         Right ()
+
+  Right []
 
 parseConfig :: Either Error Config
 parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
@@ -135,6 +164,48 @@ fromMsg raw = Event { eventHost = To $ show $ UDP.msgSender raw
 
 toMsg :: Event -> NS.SockAddr -> UDP.Message
 toMsg e addr = UDP.Message { UDP.msgData = eventBody e, UDP.msgSender = addr }
+
+handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
+handleTCPMessage store sockAddr = awaitForever $ \bs ->
+    let (msgData, msgSender) = (bs, sockAddr)
+        -- n = BS.unpack $ BS.take 1 msgData
+        raw = BS.drop 1 msgData
+        inc = Event { eventHost = From $ show msgSender
+                    , eventMsg = either (const Nothing) Just $ decode raw
+                    , eventBody = raw
+                    }
+        msg = eventMsg inc
+    in
+        case msg of
+            Just (Ack seq payload) -> respond inc Nothing
+            Just (Alive incarnation n addr port vsn) -> respond inc Nothing
+
+            Just (Ping seqNo node) -> do
+                let ack = Ack { seqNo = seqNo, payload = [] }
+                    out = Event { eventHost = From $ show $ sockAddr
+                                , eventMsg = Just ack
+                                , eventBody = encode ack
+                                }
+                    udpMsg = toMsg out sockAddr
+
+                respond inc $ Just (out, eventBody out)
+
+            -- Just (Dead incarnation node from) -> do
+            --   found <- atomically $ do
+            --     mems <- readTVar $ storeMembers store
+
+            -- failed to parse
+            Nothing -> respond inc Nothing
+
+            -- not implemented
+            _ -> respond inc Nothing
+  where
+    -- record the in/out events and send a response
+    events = storeEvents store
+    recordEvents es = liftIO . atomically $ modifyTVar events (es <>)
+
+    respond inc (Just (out, udp)) = recordEvents [ inc, out ] >> yield udp
+    respond inc Nothing = recordEvents [ inc ]
 
 handleMessage :: Store -> Conduit UDP.Message IO UDP.Message
 handleMessage store = awaitForever $ \r ->
@@ -234,7 +305,11 @@ blah = do
                       , memberLastChange = now
                       }
     store <- makeStore self
-    installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
+    _ <- installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
+
+    forkIO $
+      runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
+        appSource client $$ handleTCPMessage store (appSockAddr client) =$ appSink client
 
     -- sendAndReceiveState
     withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
