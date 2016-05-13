@@ -1,5 +1,6 @@
 import qualified Core
 import           Types
+import           Wire
 
 import           Control.Concurrent.STM ( atomically )
 import           Control.Concurrent.STM.TVar ( newTVarIO, writeTVar, modifyTVar, swapTVar, readTVar )
@@ -97,7 +98,7 @@ main = hspec $ do
 
       decoded `shouldBe` Right ping
 
-    it "encodes compound msgs" $ do
+    it "encodes & decodes compound" $ do
       let ping1 = Ping { seqNo = 1, node = "a" }
           ack1 = Ack { seqNo = 2, payload = [] }
           ping2 = Ping { seqNo = 3, node = "b" }

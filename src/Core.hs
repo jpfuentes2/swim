@@ -2,36 +2,31 @@
 
 module Core where
 
-import qualified Data.Aeson as Aeson (encode)
-import           Data.MessagePack.Aeson (packAeson, unpackAeson)
-
 import           Control.Concurrent (threadDelay, forkIO)
 import           Control.Concurrent.Async (race)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception.Base (bracket)
-import           Control.Monad.Identity
 import           Control.Monad.IO.Class (MonadIO (liftIO))
+import           Control.Monad.Identity
 import           Control.Monad.Trans.Class (lift)
-import qualified Data.ByteString             as BS (ByteString, null, append, concat, drop, empty,
-                                                    take, pack, unpack, length, uncons)
-import qualified Data.ByteString.Builder     as BSB (word16BE, toLazyByteString)
+import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
+import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
 import           Data.Conduit
 import qualified Data.Conduit.Combinators as CC (map, omapE, print, stdout, sinkNull)
+import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
 import           Data.Conduit.Network (sinkSocket)
-import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
 import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
                                                      sinkToSocket, sourceSocket)
-import Data.Conduit.Network  (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import           Data.Maybe (fromMaybe)
+import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
 import           Data.Foldable (find)
 import qualified Data.List.NonEmpty as NonEmpty (fromList)
 import qualified Data.Map.Strict             as Map (elems, empty, filter,
                                                      lookup, insert)
-import           Data.Word ( Word16, Word32, Word8 )
+import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
 import           Data.Time.Clock (UTCTime (..), getCurrentTime)
@@ -42,6 +37,7 @@ import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
 import           System.Random (getStdRandom, randomR)
 import           Types
+import           Wire
 
 type Second = Int
 
@@ -56,41 +52,6 @@ isDead = (== IsDead) . memberAlive
 
 notAlive :: Member -> Bool
 notAlive = not . isAlive
-
-toWord8 :: Int -> Word8
-toWord8 n = fromIntegral n :: Word8
-
-toWord16 :: Int -> Word16
-toWord16 n = fromIntegral n :: Word16
-
-encode :: Message -> BS.ByteString
-encode = toStrict . packAeson
-
--- TODO: reduce list traversal please
--- | msg type | num msgs | len of each msg |
--- |---------------------------------------|
--- |                body                   |
-encodeCompound :: [Message] -> BS.ByteString
-encodeCompound msgs =
-  let (msgIdx, numMsgs) = (toWord8 $ fromEnum CompoundMsg, toWord8 $ length msgs)
-      encoded = map encode msgs
-      msgLengths = foldl (\b msg -> b <> BSB.word16BE (toWord16 $ BS.length msg)) mempty encoded
-      header = BS.pack [msgIdx, numMsgs] <> toStrict (BSB.toLazyByteString msgLengths)
-  in BS.append header $ BS.concat encoded
-
-decode :: BS.ByteString -> Either Error Message
-decode bs = maybe err Right (unpackAeson $ fromStrict bs)
-  where err = Left $ "Could not parse " <> show bs
-
-decodeCompound :: BS.ByteString -> Either Error [Message]
-decodeCompound bs = do
-  (numMsgs, rest) <- maybe (Left "missing compound length byte") Right $ BS.uncons bs
-  _ <- if BS.length rest < fromIntegral numMsgs * 2 then
-         Left "compound message is truncated"
-       else
-         Right ()
-
-  Right []
 
 parseConfig :: Either Error Config
 parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
