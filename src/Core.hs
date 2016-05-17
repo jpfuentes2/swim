@@ -23,7 +23,6 @@ import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
 import           Data.Foldable (find)
-import qualified Data.List.NonEmpty as NonEmpty (fromList)
 import qualified Data.Map.Strict             as Map (elems, empty, filter,
                                                      lookup, insert)
 import           Data.Maybe (fromMaybe)

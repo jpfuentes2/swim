@@ -3,13 +3,16 @@
 module Util where
 
 import           Control.Concurrent (threadDelay)
+import           Control.Exception.Base (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
+import qualified Data.List.NonEmpty as NEL (fromList)
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Monoid ((<>))
 import           Data.Time.Clock (UTCTime(..), getCurrentTime)
 import           Data.Word (Word16, Word8)
+import           Network.Socket (Socket, close)
 import           System.Random (getStdRandom, randomR)
 import           Types
 
@@ -68,7 +71,7 @@ shuffle as = do
 parseConfig :: Either Error Config
 parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
                            , joinHost = "udp://127.0.0.1:4000"
-                           , configJoinHosts = NonEmpty.fromList [ "udp://127.0.0.1:4000" ]
+                           , configJoinHosts = NEL.fromList [ "udp://127.0.0.1:4000" ]
                            , configUDPBufferSize = 65336
                            , cfgGossipNodes = 10
                            }
