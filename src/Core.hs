@@ -35,14 +35,8 @@ import           Network.Socket.Internal     (HostAddress,
                                               SockAddr (SockAddrInet))
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
-import           System.Random (getStdRandom, randomR)
 import           Types
-import           Wire
-
-type Second = Int
-
-seconds :: Int -> Second
-seconds i = i * 1000000
+import           Util
 
 isAlive :: Member -> Bool
 isAlive = (== IsAlive) . memberAlive
@@ -52,14 +46,6 @@ isDead = (== IsDead) . memberAlive
 
 notAlive :: Member -> Bool
 notAlive = not . isAlive
-
-parseConfig :: Either Error Config
-parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
-                           , joinHost = "udp://127.0.0.1:4000"
-                           , configJoinHosts = NonEmpty.fromList [ "udp://127.0.0.1:4000" ]
-                           , configUDPBufferSize = 65336
-                           , cfgGossipNodes = 10
-                           }
 
 atomicIncr :: Num a => TVar a -> IO a
 atomicIncr tvar = atomically incr
@@ -105,17 +91,6 @@ kRandomNodes :: Int -> [Member] -> [Member] -> IO [Member]
 kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
-
--- Fisher-Yates shuffle
-shuffle :: [a] -> IO [a]
-shuffle [] = return []
-shuffle as = do
-  rand <- getStdRandom $ randomR (0, length as - 1) -- [0, n)
-  let (left, a:right) = splitAt rand as
-  (a:) <$> shuffle (left <> right)
-
-after :: Int -> IO UTCTime
-after = return getCurrentTime . threadDelay
 
 fromMsg :: UDP.Message -> Event
 fromMsg raw = Event { eventHost = To $ show $ UDP.msgSender raw
@@ -232,9 +207,6 @@ makeStore self = do
                       -- , storeNumMembers = num
                       }
     return store
-
-withSocket :: IO Socket -> (Socket -> IO a) -> IO a
-withSocket s = bracket s close
 
 dumpEvents :: Store -> IO ()
 dumpEvents s = do

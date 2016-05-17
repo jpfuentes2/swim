@@ -1,6 +1,6 @@
 import qualified Core
 import           Types
-import           Wire
+import           Util
 
 import           Control.Concurrent.STM ( atomically )
 import           Control.Concurrent.STM.TVar ( newTVarIO, writeTVar, modifyTVar, swapTVar, readTVar )

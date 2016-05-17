@@ -1,14 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Wire where
+module Util where
 
-import qualified Data.ByteString             as BS (ByteString, null, append, concat, drop, empty,
-                                                    take, pack, unpack, length, uncons)
+import           Control.Concurrent (threadDelay)
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Monoid ((<>))
-import           Data.Word (Word16, Word32, Word8)
+import           Data.Time.Clock (UTCTime(..), getCurrentTime)
+import           Data.Word (Word16, Word8)
+import           System.Random (getStdRandom, randomR)
 import           Types
 
 toWord8 :: Int -> Word8
@@ -46,3 +48,30 @@ decodeCompound bs = do
   -- let lengths =
 
   Right []
+
+type Second = Int
+
+seconds :: Int -> Second
+seconds i = i * 1000000
+
+after :: Int -> IO UTCTime
+after = return getCurrentTime . threadDelay
+
+-- Fisher-Yates shuffle
+shuffle :: [a] -> IO [a]
+shuffle [] = return []
+shuffle as = do
+  rand <- getStdRandom $ randomR (0, length as - 1) -- [0, n)
+  let (left, a:right) = splitAt rand as
+  (a:) <$> shuffle (left <> right)
+
+parseConfig :: Either Error Config
+parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
+                           , joinHost = "udp://127.0.0.1:4000"
+                           , configJoinHosts = NonEmpty.fromList [ "udp://127.0.0.1:4000" ]
+                           , configUDPBufferSize = 65336
+                           , cfgGossipNodes = 10
+                           }
+
+withSocket :: IO Socket -> (Socket -> IO a) -> IO a
+withSocket s = bracket s close
