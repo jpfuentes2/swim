@@ -111,30 +111,6 @@ handleTCPMessage store sockAddr = awaitForever $ \bs ->
             -- not implemented
             _ -> return ()
 
-getSocketUDP' :: String -> Int -> IO Socket
-getSocketUDP' host port = do
-    (sock, info) <- getSocketUDP host port
-    -- reuse since hashicorp/memberlist seems to want us to use same port
-    setSocketOption sock ReuseAddr 1
-    NS.bind sock (addrAddress info) >> return sock
-
-makeStore :: Member -> IO Store
-makeStore self = do
-    mems <- newTVarIO Map.empty
-    -- num <- newTVarIO 0
-    events <- newTVarIO []
-    seqNo <- newTVarIO 0
-    inc <- newTVarIO 0
-    ackHandler <- newTMChanIO
-    let store = Store { storeSeqNo = seqNo
-                      , storeIncarnation = inc
-                      , storeMembers = mems
-                      , storeSelf = self
-                      , storeAckHandler = ackHandler
-                      -- , storeNumMembers = num
-                      }
-    return store
-
 -- gossip/schedule
 waitForAckOf :: AckChan -> IO ()
 waitForAckOf (AckChan chan seqNo') =
@@ -193,18 +169,6 @@ disseminator :: Store -> Socket -> TMChan (Message, SockAddr) -> IO ()
 disseminator store socket chan = undefined
   -- UDP.sinkToSocket udpSocket
 
-dumpStore :: Store -> IO ()
-dumpStore s = do
-  (seqNo, inc, membs, self) <- atomically $ do
-    seqNo <- readTVar $ storeSeqNo s
-    inc <- readTVar $ storeIncarnation s
-    membs <- readTVar $ storeMembers s
-    return (seqNo, inc, membs, storeSelf s)
-
-  print $ "(seqNo, inc) " <> show (seqNo, inc)
-  print $ "members: " <> show membs
-  print $ "self: " <> show self
-
 blah = do
     now <- getCurrentTime
     let self = Member { memberName = "myself"
@@ -222,6 +186,6 @@ blah = do
         appSource client $$ handleTCPMessage store (appSockAddr client) =$ appSink client
 
     -- sendAndReceiveState
-    withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
+    withSocket (bindUDP "127.0.0.1" 4000) $ \udpSocket -> do
       forkIO $ disseminator store udpSocket gossipChan
       UDP.sourceSocket udpSocket 65335 $$ handleUDPMessage store $= sinkTMChan gossipChan False
