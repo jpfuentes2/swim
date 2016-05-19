@@ -151,14 +151,11 @@ membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
   where
     self = storeSelf s
 
-invokeAckHandler :: Store -> Word32 -> STM ()
-invokeAckHandler store = writeTMChan (storeAckHandler store)
-
 -- ping -> respond with ack
 -- ack -> invoke ack handler (a single chan to a map of handlers?)
 -- compound -> recursively call self -- may need to switch to ConduitM
 -- indirect -> ping the remote host & *create* ack handler
-handleUDPMessage :: Store -> Conduit UDP.Message IO Message
+handleUDPMessage :: Store -> Conduit UDP.Message IO (Message, SockAddr)
 handleUDPMessage store = awaitForever $ \r ->
     let (msgData, msgSender) = (UDP.msgData r, UDP.msgSender r)
         -- n = BS.unpack $ BS.take 1 msgData
@@ -166,12 +163,15 @@ handleUDPMessage store = awaitForever $ \r ->
         msg = either (const Nothing) Just $ decode raw
     in
         case msg of
-            Just (Ack seqNo payload) -> do
-              liftIO $ atomically $ invokeAckHandler store seqNo
+            Just (Ack _seqNo _) -> do
+              liftIO $ atomically $ writeTMChan (storeAckHandler store) _seqNo
               return ()
 
-            Just (Ping seqNo node) ->
-              yield Ack { seqNo = seqNo, payload = [] }
+            Just (Ping _seqNo _node)
+              | _node == memberName (storeSelf store) ->
+                yield (Ack {seqNo = _seqNo, payload = []}, msgSender)
+              | otherwise ->
+                return ()
 
             Just (IndirectPing seqNo fromAddr node) -> do
               return ()
@@ -186,10 +186,10 @@ handleUDPMessage store = awaitForever $ \r ->
             -- not implemented
             _ -> return ()
 
--- disseminator takes care of gossipng messages from both
+-- disseminator takes care of gossiping messages from both
 -- acks received from the ackHandler chan and broadcast requests
 -- to a member using our UDP socket
-disseminator :: Store -> Socket -> TMChan UDP.Message -> IO ()
+disseminator :: Store -> Socket -> TMChan (Message, SockAddr) -> IO ()
 disseminator store socket chan = undefined
   -- UDP.sinkToSocket udpSocket
 
@@ -224,4 +224,4 @@ blah = do
     -- sendAndReceiveState
     withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
       forkIO $ disseminator store udpSocket gossipChan
-      UDP.sourceSocket udpSocket 65335 $$ handleUDPMessage store $= sinkTMChan gossipChan
+      UDP.sourceSocket udpSocket 65335 $$ handleUDPMessage store $= sinkTMChan gossipChan False
