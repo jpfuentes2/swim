@@ -19,7 +19,7 @@ import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverS
 import           Data.Conduit.Network (sinkSocket)
 import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
                                                      sinkToSocket, sourceSocket)
-import           Data.Conduit.TMChan (TMChan(..), sourceTMChan)
+import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
 import           Data.Foldable (find)
@@ -34,6 +34,7 @@ import           Network.Socket.Internal     (HostAddress,
                                               SockAddr (SockAddrInet))
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
+import           Data.Word (Word16, Word32, Word8)
 import           Types
 import           Util
 
@@ -69,7 +70,6 @@ nextIncarnation' s n = do
   else
      writeTVar (storeIncarnation s) inc' >> return inc'
 
-
 aliveMembers :: [Member] -> [Member]
 aliveMembers = filter isAlive
 
@@ -91,98 +91,25 @@ kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
 
-fromMsg :: UDP.Message -> Event
-fromMsg raw = Event { eventHost = To $ show $ UDP.msgSender raw
-                    , eventMsg = either (const Nothing) Just $ decode $ UDP.msgData raw
-                    , eventBody = UDP.msgData raw
-                    }
-
-toMsg :: Event -> NS.SockAddr -> UDP.Message
-toMsg e addr = UDP.Message { UDP.msgData = eventBody e, UDP.msgSender = addr }
-
+-- should only handle: user, pushPull, ping
+-- doesn't use acks obviously
 handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
 handleTCPMessage store sockAddr = awaitForever $ \bs ->
     let (msgData, msgSender) = (bs, sockAddr)
         -- n = BS.unpack $ BS.take 1 msgData
         raw = BS.drop 1 msgData
-        inc = Event { eventHost = From $ show msgSender
-                    , eventMsg = either (const Nothing) Just $ decode raw
-                    , eventBody = raw
-                    }
-        msg = eventMsg inc
+        msg = either (const Nothing) Just $ decode raw
     in
         case msg of
-            Just (Ack seq payload) -> respond inc Nothing
-            Just (Alive incarnation n addr port vsn) -> respond inc Nothing
-
-            Just (Ping seqNo node) -> do
-                let ack = Ack { seqNo = seqNo, payload = [] }
-                    out = Event { eventHost = From $ show $ sockAddr
-                                , eventMsg = Just ack
-                                , eventBody = encode ack
-                                }
-                    udpMsg = toMsg out sockAddr
-
-                respond inc $ Just (out, eventBody out)
-
-            -- Just (Dead incarnation node from) -> do
-            --   found <- atomically $ do
-            --     mems <- readTVar $ storeMembers store
+            Just (Ack seq payload) -> return ()
+            Just (Alive incarnation n addr port vsn) -> return ()
+            Just (Ping seqNo node) -> return ()
 
             -- failed to parse
-            Nothing -> respond inc Nothing
+            Nothing -> return ()
 
             -- not implemented
-            _ -> respond inc Nothing
-  where
-    -- record the in/out events and send a response
-    events = storeEvents store
-    recordEvents es = liftIO . atomically $ modifyTVar events (es <>)
-
-    respond inc (Just (out, udp)) = recordEvents [ inc, out ] >> yield udp
-    respond inc Nothing = recordEvents [ inc ]
-
-handleMessage :: Store -> Conduit UDP.Message IO UDP.Message
-handleMessage store = awaitForever $ \r ->
-    let (msgData, msgSender) = (UDP.msgData r, UDP.msgSender r)
-        -- n = BS.unpack $ BS.take 1 msgData
-        raw = BS.drop 1 msgData
-        inc = Event { eventHost = From $ show msgSender
-                    , eventMsg = either (const Nothing) Just $ decode raw
-                    , eventBody = raw
-                    }
-        msg = eventMsg inc
-    in
-        case msg of
-            Just (Ack seq payload) -> respond inc Nothing
-            Just (Alive incarnation n addr port vsn) -> respond inc Nothing
-
-            Just (Ping seqNo node) -> do
-                let ack = Ack { seqNo = seqNo, payload = [] }
-                    out = Event { eventHost = From $ show $ UDP.msgSender r
-                                , eventMsg = Just ack
-                                , eventBody = encode ack
-                                }
-                    udpMsg = toMsg out $ UDP.msgSender r
-
-                respond inc $ Just (out, udpMsg)
-
-            -- Just (Dead incarnation node from) -> do
-            --   found <- atomically $ do
-            --     mems <- readTVar $ storeMembers store
-
-            -- failed to parse
-            Nothing -> respond inc Nothing
-
-            -- not implemented
-            _ -> respond inc Nothing
-  where
-    -- record the in/out events and send a response
-    events = storeEvents store
-    recordEvents es = liftIO . atomically $ modifyTVar events (es <>)
-
-    respond inc (Just (out, udp)) = recordEvents [ inc, out ] >> yield udp
-    respond inc Nothing = recordEvents [ inc ]
+            _ -> return ()
 
 getSocketUDP' :: String -> Int -> IO Socket
 getSocketUDP' host port = do
@@ -198,19 +125,15 @@ makeStore self = do
     events <- newTVarIO []
     seqNo <- newTVarIO 0
     inc <- newTVarIO 0
+    ackHandler <- newTMChanIO
     let store = Store { storeSeqNo = seqNo
                       , storeIncarnation = inc
                       , storeMembers = mems
-                      , storeEvents = events
                       , storeSelf = self
+                      , storeAckHandler = ackHandler
                       -- , storeNumMembers = num
                       }
     return store
-
-dumpEvents :: Store -> IO ()
-dumpEvents s = do
-    events <- atomically $ readTVar $ storeEvents s
-    mapM_ print events
 
 -- gossip/schedule
 waitForAckOf :: AckChan -> IO ()
@@ -228,6 +151,60 @@ membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
   where
     self = storeSelf s
 
+invokeAckHandler :: Store -> Word32 -> STM ()
+invokeAckHandler store = writeTMChan (storeAckHandler store)
+
+-- ping -> respond with ack
+-- ack -> invoke ack handler (a single chan to a map of handlers?)
+-- compound -> recursively call self -- may need to switch to ConduitM
+-- indirect -> ping the remote host & *create* ack handler
+handleUDPMessage :: Store -> Conduit UDP.Message IO Message
+handleUDPMessage store = awaitForever $ \r ->
+    let (msgData, msgSender) = (UDP.msgData r, UDP.msgSender r)
+        -- n = BS.unpack $ BS.take 1 msgData
+        raw = BS.drop 1 msgData
+        msg = either (const Nothing) Just $ decode raw
+    in
+        case msg of
+            Just (Ack seqNo payload) -> do
+              liftIO $ atomically $ invokeAckHandler store seqNo
+              return ()
+
+            Just (Ping seqNo node) ->
+              yield Ack { seqNo = seqNo, payload = [] }
+
+            Just (IndirectPing seqNo fromAddr node) -> do
+              return ()
+
+            -- Just (Dead incarnation node from) -> do
+            --   found <- atomically $ do
+            --     mems <- readTVar $ storeMembers store
+
+            -- failed to parse
+            Nothing -> return ()
+
+            -- not implemented
+            _ -> return ()
+
+-- disseminator takes care of gossipng messages from both
+-- acks received from the ackHandler chan and broadcast requests
+-- to a member using our UDP socket
+disseminator :: Store -> Socket -> TMChan UDP.Message -> IO ()
+disseminator store socket chan = undefined
+  -- UDP.sinkToSocket udpSocket
+
+dumpStore :: Store -> IO ()
+dumpStore s = do
+  (seqNo, inc, membs, self) <- atomically $ do
+    seqNo <- readTVar $ storeSeqNo s
+    inc <- readTVar $ storeIncarnation s
+    membs <- readTVar $ storeMembers s
+    return (seqNo, inc, membs, storeSelf s)
+
+  print $ "(seqNo, inc) " <> show (seqNo, inc)
+  print $ "members: " <> show membs
+  print $ "self: " <> show self
+
 blah = do
     now <- getCurrentTime
     let self = Member { memberName = "myself"
@@ -237,7 +214,8 @@ blah = do
                       , memberLastChange = now
                       }
     store <- makeStore self
-    _ <- installHandler sigUSR1 (Catch $ dumpEvents store) Nothing
+    _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
+    gossipChan <- newTMChanIO
 
     forkIO $
       runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
@@ -245,4 +223,5 @@ blah = do
 
     -- sendAndReceiveState
     withSocket (getSocketUDP' "127.0.0.1" 4000) $ \udpSocket -> do
-      UDP.sourceSocket udpSocket 65336 $$ handleMessage store $= UDP.sinkToSocket udpSocket
+      forkIO $ disseminator store udpSocket gossipChan
+      UDP.sourceSocket udpSocket 65335 $$ handleUDPMessage store $= sinkTMChan gossipChan

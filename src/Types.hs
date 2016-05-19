@@ -13,7 +13,7 @@ import           Data.List.NonEmpty ( NonEmpty(..) )
 import qualified Data.Map.Strict as Map
 import           Data.Monoid ( (<>) )
 import           Data.Time.Clock ( UTCTime(..) )
-import           Data.Word ( Word16, Word32, Word8 )
+import           Data.Word (Word16, Word32, Word8)
 
 type Error = String
 
@@ -42,17 +42,12 @@ instance Ord Member where
 
 data EventHost = To String | From String deriving (Show, Eq)
 
-data Event = Event { eventHost :: EventHost
-                   , eventMsg :: Maybe Message
-                   , eventBody :: ByteString
-                   } deriving (Show, Eq)
-
 data Store = Store { storeSeqNo :: TVar Int
                    , storeIncarnation :: TVar Int
                    -- , storeNumMembers :: TVar Int -- estimate, aka known unknown, of members
                    , storeMembers :: TVar (Map.Map String Member) -- known known of members
                    , storeSelf :: Member
-                   , storeEvents :: TVar [Event] -- event log
+                   , storeAckHandler :: AckHandler
                    }
 
 -- The state of a Member
@@ -96,6 +91,8 @@ data InternalMessage = Gossip [Member] | Nada
 newtype AckResponse = AckResponse Word32
 
 data AckChan = AckChan (TMChan Word32) Word32
+
+type AckHandler = TMChan Word32
 
 data MsgType = PingMsg
              | IndirectPingMsg
