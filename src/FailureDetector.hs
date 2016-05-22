@@ -16,6 +16,7 @@ import           Data.Word (Word16, Word32)
 
 import           Core
 import           Types
+import           Util
 
 -- TODO: need a timer to mark this node as dead after suspect timeout
 -- TODO: solve the expression problem of our Message type: we want Suspect msg here
@@ -108,7 +109,7 @@ failureDetector cfg s =
     loop
   where
     loop = do
-        _ <- threadDelay 500000 >> getCurrentTime
+        _ <- after $ seconds 5
         members <- kRandomNodesExcludingSelf cfg s
 
         -- mapM_ (\node -> do

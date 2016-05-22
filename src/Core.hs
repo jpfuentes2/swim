@@ -16,7 +16,6 @@ import           Data.ByteString.Lazy (fromStrict, toStrict)
 import           Data.Conduit
 import qualified Data.Conduit.Combinators as CC (map, omapE, print, stdout, sinkNull)
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import           Data.Conduit.Network (sinkSocket)
 import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
                                                      sinkToSocket, sourceSocket)
 import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
@@ -29,12 +28,12 @@ import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
 import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
 import           Data.Time.Clock (UTCTime (..), getCurrentTime)
+import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket as NS
 import           Network.Socket.Internal     (HostAddress,
                                               SockAddr (SockAddrInet))
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
-import           Data.Word (Word16, Word32, Word8)
 import           Types
 import           Util
 
@@ -73,9 +72,9 @@ nextIncarnation' s n = do
 aliveMembers :: [Member] -> [Member]
 aliveMembers = filter isAlive
 
-removeDeadNodes :: Store -> IO ()
+removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
-  atomically $ modifyTVar (storeMembers s) $ Map.filter (not . isDead)
+  modifyTVar (storeMembers s) $ Map.filter (not . isDead)
 
 -- gives kRandomNodes excluding our own host from the list
 kRandomNodesExcludingSelf :: Config -> Store -> IO [Member]
@@ -90,26 +89,6 @@ kRandomNodes :: Int -> [Member] -> [Member] -> IO [Member]
 kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
-
--- should only handle: user, pushPull, ping
--- doesn't use acks obviously
-handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
-handleTCPMessage store sockAddr = awaitForever $ \bs ->
-    let (msgData, msgSender) = (bs, sockAddr)
-        -- n = BS.unpack $ BS.take 1 msgData
-        raw = BS.drop 1 msgData
-        msg = either (const Nothing) Just $ decode raw
-    in
-        case msg of
-            Just (Ack seq payload) -> return ()
-            Just (Alive incarnation n addr port vsn) -> return ()
-            Just (Ping seqNo node) -> return ()
-
-            -- failed to parse
-            Nothing -> return ()
-
-            -- not implemented
-            _ -> return ()
 
 -- gossip/schedule
 waitForAckOf :: AckChan -> IO ()
@@ -127,6 +106,24 @@ membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
   where
     self = storeSelf s
 
+-- should only handle: user, pushPull, ping
+-- doesn't use acks obviously
+handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
+handleTCPMessage store sockAddr = awaitForever $ \bs ->
+    let (msgData, msgSender) = (bs, sockAddr)
+        -- n = BS.unpack $ BS.take 1 msgData
+        raw = BS.drop 1 msgData
+        msg = either (const Nothing) Just $ decode raw
+    in
+        case msg of
+            Just (Ping seqNo node) -> return ()
+
+            -- failed to parse
+            Nothing -> return ()
+
+            -- not implemented
+            _ -> return ()
+
 -- ping -> respond with ack
 -- ack -> invoke ack handler (a single chan to a map of handlers?)
 -- compound -> recursively call self -- may need to switch to ConduitM
@@ -139,28 +136,32 @@ handleUDPMessage store = awaitForever $ \r ->
         msg = either (const Nothing) Just $ decode raw
     in
         case msg of
-            Just (Ack _seqNo _) -> do
-              liftIO $ atomically $ writeTMChan (storeAckHandler store) _seqNo
+          -- invoke ack handler for this sequence num and do nothing else here
+          Just (Ack _seqNo _) -> do
+            liftIO $ atomically $ writeTMChan (storeAckHandler store) _seqNo
+            return ()
+
+          -- respond with Ack if the ping was meant for us
+          Just (Ping _seqNo _node)
+            | _node == memberName (storeSelf store) ->
+              yield (Ack {seqNo = _seqNo, payload = []}, msgSender)
+            | otherwise ->
               return ()
 
-            Just (Ping _seqNo _node)
-              | _node == memberName (storeSelf store) ->
-                yield (Ack {seqNo = _seqNo, payload = []}, msgSender)
-              | otherwise ->
-                return ()
+          Just (IndirectPing _seqNo _target _port _node) -> do
+            next <- liftIO $ nextIncarnation store
+            yield (Ping { seqNo = fromIntegral next, node = _node }, SockAddrInet _port _target)
+            return ()
 
-            Just (IndirectPing seqNo fromAddr node) -> do
-              return ()
+          -- Just (Dead incarnation node from) -> do
+          --   found <- atomically $ do
+          --     mems <- readTVar $ storeMembers store
 
-            -- Just (Dead incarnation node from) -> do
-            --   found <- atomically $ do
-            --     mems <- readTVar $ storeMembers store
+          -- failed to parse
+          Nothing -> return ()
 
-            -- failed to parse
-            Nothing -> return ()
-
-            -- not implemented
-            _ -> return ()
+          -- not implemented
+          _ -> return ()
 
 -- disseminator takes care of gossiping messages from both
 -- acks received from the ackHandler chan and broadcast requests

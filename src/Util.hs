@@ -4,8 +4,7 @@ module Util where
 
 import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.STM (atomically)
-import           Control.Concurrent.STM.TVar (newTVarIO)
-import           Control.Concurrent.STM.TVar (readTVar)
+import           Control.Concurrent.STM.TVar (newTVarIO, readTVar)
 import           Control.Exception.Base (bracket)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
@@ -17,7 +16,7 @@ import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Monoid ((<>))
 import           Data.Streaming.Network (getSocketUDP)
 import           Data.Time.Clock (UTCTime(..), getCurrentTime)
-import           Data.Word (Word16, Word32, Word8)
+import           Data.Word (Word16, Word8)
 import           Network.Socket (Socket, close, setSocketOption, SocketOption(ReuseAddr), bind, addrAddress)
 import           System.Random (getStdRandom, randomR)
 import           Types
@@ -61,12 +60,12 @@ decodeCompound bs = do
 type Second = Int
 
 seconds :: Int -> Second
-seconds i = i * 1000000
+seconds = (1000000 *)
 
-after :: Int -> IO UTCTime
+after :: Second -> IO UTCTime
 after = return getCurrentTime . threadDelay
 
--- Fisher-Yates shuffle
+-- O(N^2) Fisher-Yates shuffle. it's okay our lists are small for now
 shuffle :: [a] -> IO [a]
 shuffle [] = return []
 shuffle as = do
@@ -101,7 +100,7 @@ dumpStore s = do
     membs <- readTVar $ storeMembers s
     return (seqNo, inc, membs, storeSelf s)
 
-  print $ "(seqNo, inc) " <> show (_seqNo, inc)
+  --print $ "(seqNo, inc) " <> show (_seqNo, inc)
   print $ "members: " <> show membs
   print $ "self: " <> show self
 

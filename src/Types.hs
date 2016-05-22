@@ -59,7 +59,8 @@ data Message = Ping { seqNo :: Word32
                     , node  :: String
                     }
              | IndirectPing { seqNo :: Word32
-                            , fromAddr  :: Word32
+                            , target  :: Word32
+                            , port  :: Word16
                             , node  :: String
                             }
              | Ack { seqNo   :: Word32
@@ -118,7 +119,7 @@ msgIndex m = case m of
 instance FromJSON Message where
   parseJSON = withObject "message" $ \o -> asum [
     Ping <$> o .: "SeqNo" <*> o .: "Node",
-    IndirectPing <$> o .: "SeqNo" <*> o .: "FromAddr" <*> o .: "Node",
+    IndirectPing <$> o .: "SeqNo" <*> o .: "Target" <*> o .: "Port" <*> o .: "Node",
     Ack <$> o .: "SeqNo" <*> o .: "Payload",
     Suspect <$> o .: "Incarnation" <*> o .: "Node",
     Alive <$> o .: "Incarnation" <*> o .: "Node" <*> o .: "FromAddr" <*> o .: "Port" <*> o .: "Version",
@@ -131,7 +132,8 @@ instance ToJSON Message where
 
   toJSON IndirectPing{..} = object [
     "SeqNo" .= seqNo,
-    "FromAddr"  .= fromAddr,
+    "Target" .= target,
+    "Port"  .= port,
     "Node"  .= node ]
 
   toJSON Ack{..} = object [
