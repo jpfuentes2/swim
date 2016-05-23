@@ -3,6 +3,7 @@
 
 module FailureDetector where
 
+import qualified Data.ByteString as BS
 import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.Async (race)
 import           Control.Concurrent.STM (atomically)
@@ -13,6 +14,7 @@ import           Data.Foldable (find)
 import qualified Data.Map.Strict as Map (elems, insert)
 import           Data.Time.Clock (getCurrentTime)
 import           Data.Word (Word16, Word32)
+import           Network.Socket.Internal (SockAddr(SockAddrInet))
 
 import           Core
 import           Types
@@ -91,7 +93,11 @@ probeNode cfg s m seqNo' ackWaiter = do
 
     -- send IndirectPing to kRandomNodes
     Left _ -> do
-      let indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo', fromAddr = 1 :: Word32, node = "wat" }
+      let SockAddrInet port host = memberHostNew m
+          indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo'
+                                          , target = toWord32 123 -- TODO: FIXME
+                                          , port = toWord16 4000 -- TODO: FIXME
+                                          , node = "wat" }
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes
       ack <- liftIO ackWaiter

@@ -16,7 +16,7 @@ import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Monoid ((<>))
 import           Data.Streaming.Network (getSocketUDP)
 import           Data.Time.Clock (UTCTime(..), getCurrentTime)
-import           Data.Word (Word16, Word8)
+import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket (Socket, close, setSocketOption, SocketOption(ReuseAddr), bind, addrAddress)
 import           System.Random (getStdRandom, randomR)
 import           Types
@@ -26,6 +26,9 @@ toWord8 n = fromIntegral n :: Word8
 
 toWord16 :: Int -> Word16
 toWord16 n = fromIntegral n :: Word16
+
+toWord32 :: Int -> Word32
+toWord32 n = fromIntegral n :: Word32
 
 encode :: Message -> BS.ByteString
 encode = toStrict . packAeson
@@ -103,6 +106,12 @@ dumpStore s = do
   --print $ "(seqNo, inc) " <> show (_seqNo, inc)
   print $ "members: " <> show membs
   print $ "self: " <> show self
+
+decodeMsgType :: BS.ByteString -> Either Error (BS.ByteString, MsgType)
+decodeMsgType bs = do
+  n <- if BS.null bs then Left "empty msg" else Right $ BS.head bs
+  -- FIXME: make me safe
+  Right (BS.drop 1 bs, toEnum (fromIntegral n :: Int))
 
 makeStore :: Member -> IO Store
 makeStore self = do

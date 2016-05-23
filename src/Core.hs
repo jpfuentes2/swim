@@ -30,8 +30,7 @@ import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
 import           Data.Time.Clock (UTCTime (..), getCurrentTime)
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket as NS
-import           Network.Socket.Internal     (HostAddress,
-                                              SockAddr (SockAddrInet))
+import           Network.Socket.Internal     (HostAddress, SockAddr (SockAddrInet))
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
 import           Types
@@ -106,62 +105,60 @@ membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
   where
     self = storeSelf s
 
--- should only handle: user, pushPull, ping
--- doesn't use acks obviously
+handleAck :: Store -> Word32 -> IO ()
+handleAck store seqNo' = atomically $ writeTMChan (storeAckHandler store) seqNo'
+
+-- we're not using TCP for anything other than initial state sync
+-- so we only handle pushPull / ping
 handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
-handleTCPMessage store sockAddr = awaitForever $ \bs ->
-    let (msgData, msgSender) = (bs, sockAddr)
-        -- n = BS.unpack $ BS.take 1 msgData
-        raw = BS.drop 1 msgData
-        msg = either (const Nothing) Just $ decode raw
-    in
-        case msg of
-            Just (Ping seqNo node) -> return ()
+handleTCPMessage store sockAddr = awaitForever $ \req ->
+  case process req of
+    Left _ -> return () -- FIXME: log it
+    Right out -> yield out
 
-            -- failed to parse
-            Nothing -> return ()
+  where process req = do
+          (bs, msgType) <- decodeMsgType req
+          msg <- case msgType of
+                      CompoundMsg -> undefined -- FIXME: recursively handle messages
+                      _ -> decode bs
+          case msg of
+            PushPull inc node' deadFrom' -> Left undefined
+            Ping seqNo' node' -> Left undefined
+            _ -> Left (("Unhandled msgType " <> show msg) :: Error) -- FIXME: error mgmt
 
-            -- not implemented
-            _ -> return ()
-
--- ping -> respond with ack
--- ack -> invoke ack handler (a single chan to a map of handlers?)
--- compound -> recursively call self -- may need to switch to ConduitM
--- indirect -> ping the remote host & *create* ack handler
+-- FIXME: handle compound messages
 handleUDPMessage :: Store -> Conduit UDP.Message IO (Message, SockAddr)
-handleUDPMessage store = awaitForever $ \r ->
-    let (msgData, msgSender) = (UDP.msgData r, UDP.msgSender r)
-        -- n = BS.unpack $ BS.take 1 msgData
-        raw = BS.drop 1 msgData
-        msg = either (const Nothing) Just $ decode raw
-    in
-        case msg of
-          -- invoke ack handler for this sequence num and do nothing else here
-          Just (Ack _seqNo _) -> do
-            liftIO $ atomically $ writeTMChan (storeAckHandler store) _seqNo
-            return ()
+handleUDPMessage store = awaitForever $ \req ->
+  case process req of
+    Left _ ->
+      return () -- FIXME: log it
 
-          -- respond with Ack if the ping was meant for us
-          Just (Ping _seqNo _node)
-            | _node == memberName (storeSelf store) ->
-              yield (Ack {seqNo = _seqNo, payload = []}, msgSender)
-            | otherwise ->
-              return ()
+    -- invoke ack handler for the sequence
+    Right (Ack seqNo' _) -> do
+      liftIO $ handleAck store seqNo'
+      return ()
 
-          Just (IndirectPing _seqNo _target _port _node) -> do
-            next <- liftIO $ nextIncarnation store
-            yield (Ping { seqNo = fromIntegral next, node = _node }, SockAddrInet _port _target)
-            return ()
+    -- respond with Ack if the ping was meant for us
+    Right (Ping seqNo' node')
+      | node' == memberName (storeSelf store) ->
+        yield (Ack {seqNo = seqNo', payload = []}, UDP.msgSender req)
+      | otherwise ->
+        return ()
 
-          -- Just (Dead incarnation node from) -> do
-          --   found <- atomically $ do
-          --     mems <- readTVar $ storeMembers store
+    -- send a ping to the requested target
+    -- and create ack handler which relays ack from target to original requester
+    Right (IndirectPing seqNo' target' port' node') -> do
+      next <- liftIO $ nextIncarnation store
+      yield (Ping { seqNo = fromIntegral next
+                  , node = node' }
+            , SockAddrInet (fromIntegral port') target')
+      return ()
 
-          -- failed to parse
-          Nothing -> return ()
-
-          -- not implemented
-          _ -> return ()
+  where process (UDP.Message rawBytes _) = do
+          (msgBytes, msgType) <- decodeMsgType rawBytes
+          case msgType of
+               CompoundMsg -> undefined -- FIXME: recursively handle messages
+               _ -> decode msgBytes
 
 -- disseminator takes care of gossiping messages from both
 -- acks received from the ackHandler chan and broadcast requests
@@ -170,10 +167,12 @@ disseminator :: Store -> Socket -> TMChan (Message, SockAddr) -> IO ()
 disseminator store socket chan = undefined
   -- UDP.sinkToSocket udpSocket
 
-blah = do
+main :: IO ()
+main = do
     now <- getCurrentTime
     let self = Member { memberName = "myself"
                       , memberHost = "localhost"
+                      , memberHostNew = SockAddrInet 123 4000
                       , memberAlive = IsAlive
                       , memberIncarnation = 0
                       , memberLastChange = now

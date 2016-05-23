@@ -14,6 +14,7 @@ import qualified Data.Map.Strict as Map
 import           Data.Monoid ( (<>) )
 import           Data.Time.Clock ( UTCTime(..) )
 import           Data.Word (Word16, Word32, Word8)
+import           Network.Socket.Internal (SockAddr)
 
 type Error = String
 
@@ -30,6 +31,7 @@ data Config = Config { bindHost :: String
 -- Member
 data Member = Member { memberName        :: String
                      , memberHost        :: Host
+                     , memberHostNew     :: SockAddr
                      , memberAlive       :: Liveness
                      , memberIncarnation :: Int
                      , memberLastChange  :: UTCTime
@@ -48,6 +50,7 @@ data Store = Store { storeSeqNo :: TVar Int
                    , storeMembers :: TVar (Map.Map String Member) -- known known of members
                    , storeSelf :: Member
                    , storeAckHandler :: AckHandler
+                   -- , storeHandlers :: TVar( Map.Map Word32 )
                    }
 
 -- The state of a Member

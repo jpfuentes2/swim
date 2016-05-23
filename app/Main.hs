@@ -1,4 +1,5 @@
 module Main where
 import qualified Core
 
-main = Core.blah
+main :: IO ()
+main = Core.main
