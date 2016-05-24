@@ -73,7 +73,7 @@ aliveMembers = filter isAlive
 
 removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
-  modifyTVar (storeMembers s) $ Map.filter (not . isDead)
+  modifyTVar' (storeMembers s) $ Map.filter (not . isDead)
 
 -- gives kRandomNodes excluding our own host from the list
 kRandomNodesExcludingSelf :: Config -> Store -> IO [Member]
@@ -160,24 +160,19 @@ handleUDPMessage store = awaitForever $ \req ->
                CompoundMsg -> undefined -- FIXME: recursively handle messages
                _ -> decode msgBytes
 
--- disseminator takes care of gossiping messages from both
--- acks received from the ackHandler chan and broadcast requests
--- to a member using our UDP socket
-disseminator :: Store -> Socket -> TMChan (Message, SockAddr) -> IO ()
-disseminator store socket chan = undefined
+-- disseminate receives messages for broadcasting to other members
+-- messages other than Ping/IndirectPing/Ack are enqueued for piggy-backing
+-- while ping/indirect-ping/ack are immediately sent
+disseminate :: Store -> TMChan (Message, SockAddr) -> IO ()
+disseminate store chan = undefined
   -- UDP.sinkToSocket udpSocket
 
 main :: IO ()
 main = do
-    now <- getCurrentTime
-    let self = Member { memberName = "myself"
-                      , memberHost = "localhost"
-                      , memberHostNew = SockAddrInet 123 4000
-                      , memberAlive = IsAlive
-                      , memberIncarnation = 0
-                      , memberLastChange = now
-                      }
+    let config = either error id parseConfig
+    self <- makeSelf config
     store <- makeStore self
+
     _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
     gossipChan <- newTMChanIO
 
@@ -187,5 +182,5 @@ main = do
 
     -- sendAndReceiveState
     withSocket (bindUDP "127.0.0.1" 4000) $ \udpSocket -> do
-      forkIO $ disseminator store udpSocket gossipChan
+      -- forkIO $ disseminator store udpSocket gossipChan
       UDP.sourceSocket udpSocket 65335 $$ handleUDPMessage store $= sinkTMChan gossipChan False

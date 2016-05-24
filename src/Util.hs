@@ -18,7 +18,9 @@ import           Data.Streaming.Network (getSocketUDP)
 import           Data.Time.Clock (UTCTime(..), getCurrentTime)
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket (Socket, close, setSocketOption, SocketOption(ReuseAddr), bind, addrAddress)
+import           Network.Socket.Internal (HostAddress, SockAddr (SockAddrInet))
 import           System.Random (getStdRandom, randomR)
+
 import           Types
 
 toWord8 :: Int -> Word8
@@ -129,3 +131,14 @@ makeStore self = do
                       -- , storeNumMembers = num
                       }
     return store
+
+makeSelf :: Config -> IO Member
+makeSelf _ = do
+    now <- getCurrentTime
+    return Member { memberName = "myself"
+                  , memberHost = "localhost"
+                  , memberHostNew = SockAddrInet 123 4000
+                  , memberAlive = IsAlive
+                  , memberIncarnation = 0
+                  , memberLastChange = now
+                  }

@@ -63,7 +63,7 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
 
     -- name = case msg of
     saveMember m =
-      modifyTVar (storeMembers s) $ Map.insert (memberName m) m
+      modifyTVar' (storeMembers s) $ Map.insert (memberName m) m
 
 suspectNode :: Store -> Message -> IO (Maybe Message)
 suspectNode s msg@(Suspect i name) = suspectOrDeadNode' s msg name i IsSuspect

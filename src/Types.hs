@@ -26,7 +26,7 @@ data Config = Config { bindHost :: String
                      , configJoinHosts :: NonEmpty String
                      , configUDPBufferSize :: Int
                      , cfgGossipNodes :: Int
-                     }
+                     } deriving (Show, Eq)
 
 -- Member
 data Member = Member { memberName        :: String
