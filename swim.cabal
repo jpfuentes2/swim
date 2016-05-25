@@ -17,35 +17,38 @@ library
   hs-source-dirs:      src
   exposed-modules:     Core, Types, FailureDetector
   build-depends:       base >= 4.7 && < 5
-                     , network-uri
-                     , conduit
-                     , conduit-extra
-                     , conduit-combinators
-                     , word8
-                     , async
-                     , mtl
-                     , either
-                     , bytestring
-                     , network
                      , aeson
+                     , async
+                     , bytestring
+                     , cereal
+                     , cereal-conduit
+                     , conduit
+                     , conduit-combinators
+                     , conduit-extra
+                     , containers
+                     , either
+                     , lens
                      , msgpack
                      , msgpack-aeson == 0.1.0.0
-                     , transformers
-                     , containers
+                     , mtl
+                     , network
+                     , network-uri
+                     , random
+                     , semigroups
                      , stm
                      , stm-conduit
                      , streaming-commons
-                     , semigroups
-                     , random
                      , time == 1.5.0.1
+                     , transformers
                      , unix
-                     , lens
+                     , word8
   default-language:    Haskell2010
+  ghc-options:         -Wall
 
 executable swim-exe
   hs-source-dirs:      app
   main-is:             Main.hs
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   build-depends:       base
                      , swim
   default-language:    Haskell2010
@@ -55,18 +58,18 @@ test-suite swim-test
   hs-source-dirs:      test
   main-is:             Spec.hs
   build-depends:       base
-                     , hspec
-                     , hspec-expectations
-                     , swim
-                     , stm
-                     , containers
                      , bytestring
                      , conduit
-                     , conduit-extra
                      , conduit-combinators
+                     , conduit-extra
+                     , containers
+                     , hspec
+                     , hspec-expectations
                      , network
+                     , stm
+                     , swim
                      , time == 1.5.0.1
-  ghc-options:         -threaded -rtsopts -with-rtsopts=-N
+  ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 
 source-repository head

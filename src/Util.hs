@@ -14,6 +14,7 @@ import qualified Data.List.NonEmpty as NEL (fromList)
 import qualified Data.Map.Strict as Map (empty)
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Monoid ((<>))
+import           Data.Serialize.Put (runPut, putWord8, putWord16be, putByteString)
 import           Data.Streaming.Network (getSocketUDP)
 import           Data.Time.Clock (UTCTime(..), getCurrentTime)
 import           Data.Word (Word16, Word32, Word8)
@@ -21,52 +22,15 @@ import           Network.Socket (Socket, close, setSocketOption, SocketOption(Re
 import           System.Random (getStdRandom, randomR)
 import           Types
 
-toWord8 :: Int -> Word8
-toWord8 n = fromIntegral n :: Word8
+type Microseconds = Int
 
-toWord16 :: Int -> Word16
-toWord16 n = fromIntegral n :: Word16
-
-toWord32 :: Int -> Word32
-toWord32 n = fromIntegral n :: Word32
-
-encode :: Message -> BS.ByteString
-encode = toStrict . packAeson
-
--- TODO: reduce list traversal please
--- | msg type | num msgs | len of each msg |
--- |---------------------------------------|
--- |                body                   |
-encodeCompound :: [Message] -> BS.ByteString
-encodeCompound msgs =
-  let (msgIdx, numMsgs) = (toWord8 $ fromEnum CompoundMsg, toWord8 $ length msgs)
-      encoded = map encode msgs
-      msgLengths = foldl (\b msg -> b <> BSB.word16BE (toWord16 $ BS.length msg)) mempty encoded
-      header = BS.pack [msgIdx, numMsgs] <> toStrict (BSB.toLazyByteString msgLengths)
-  in BS.append header $ BS.concat encoded
-
-decode :: BS.ByteString -> Either Error Message
-decode bs = maybe err Right (unpackAeson $ fromStrict bs)
-  where err = Left $ "Could not parse " <> show bs
-
-decodeCompound :: BS.ByteString -> Either Error [Message]
-decodeCompound bs = do
-  (numMsgs, rest) <- maybe (Left "missing compound length byte") Right $ BS.uncons bs
-  _ <- if BS.length rest < fromIntegral numMsgs * 2 then
-         Left "compound message is truncated"
-       else
-         Right ()
-  -- let lengths =
-
-  Right []
-
-type Second = Int
-
-seconds :: Int -> Second
+seconds :: Int -> Microseconds
 seconds = (1000000 *)
 
-after :: Second -> IO UTCTime
-after = return getCurrentTime . threadDelay
+after :: Microseconds -> IO UTCTime
+after mics = do
+  threadDelay mics
+  getCurrentTime
 
 -- O(N^2) Fisher-Yates shuffle. it's okay our lists are small for now
 shuffle :: [a] -> IO [a]
@@ -90,10 +54,10 @@ withSocket s = bracket s close
 -- opens a socket, sets SO_REUSEADDR, and the binds it
 bindUDP :: String -> Int -> IO Socket
 bindUDP host port = do
-    (sock, info) <- getSocketUDP host port
-    -- reuse since hashicorp/memberlist seems to want us to use same port
-    setSocketOption sock ReuseAddr 1
-    bind sock (addrAddress info) >> return sock
+  (sock, info) <- getSocketUDP host port
+  -- reuse since hashicorp/memberlist seems to want us to use same port
+  setSocketOption sock ReuseAddr 1
+  bind sock (addrAddress info) >> return sock
 
 dumpStore :: Store -> IO ()
 dumpStore s = do
@@ -107,25 +71,26 @@ dumpStore s = do
   print $ "members: " <> show membs
   print $ "self: " <> show self
 
-decodeMsgType :: BS.ByteString -> Either Error (BS.ByteString, MsgType)
-decodeMsgType bs = do
-  n <- if BS.null bs then Left "empty msg" else Right $ BS.head bs
-  -- FIXME: make me safe
-  Right (BS.drop 1 bs, toEnum (fromIntegral n :: Int))
+decodeMsgType :: BS.ByteString -> Either Error (MsgType, BS.ByteString)
+decodeMsgType =
+  runGet $ do
+    typ <- fromIntegral <$> getWord8
+    left <- remaining
+    return (toEnum typ, getByteString left)
 
 makeStore :: Member -> IO Store
 makeStore self = do
-    mems <- newTVarIO Map.empty
-    -- num <- newTVarIO 0
-    events <- newTVarIO []
-    seqNo <- newTVarIO 0
-    inc <- newTVarIO 0
-    ackHandler <- newTMChanIO
-    let store = Store { storeSeqNo = seqNo
-                      , storeIncarnation = inc
-                      , storeMembers = mems
-                      , storeSelf = self
-                      , storeAckHandler = ackHandler
-                      -- , storeNumMembers = num
-                      }
-    return store
+  mems <- newTVarIO Map.empty
+  -- num <- newTVarIO 0
+  events <- newTVarIO []
+  seqNo <- newTVarIO 0
+  inc <- newTVarIO 0
+  ackHandler <- newTMChanIO
+  let store = Store { storeSeqNo = seqNo
+                    , storeIncarnation = inc
+                    , storeMembers = mems
+                    , storeSelf = self
+                    , storeAckHandler = ackHandler
+                    -- , storeNumMembers = num
+                    }
+  return store
