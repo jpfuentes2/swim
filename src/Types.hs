@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
 
 module Types where
@@ -20,6 +20,8 @@ type Error = String
 
 -- replace with SockAddr
 type Host = String
+
+data Gossip = Gossip Message SockAddr
 
 data Config = Config { bindHost :: String
                      , joinHost :: String
@@ -89,8 +91,6 @@ data Message = Ping { seqNo :: Word32
                     }
              | Compound ByteString
     deriving (Eq, Show)
-
-data InternalMessage = Gossip [Member] | Nada
 
 newtype AckResponse = AckResponse Word32
 

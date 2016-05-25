@@ -95,8 +95,8 @@ probeNode cfg s m seqNo' ackWaiter = do
     Left _ -> do
       let SockAddrInet port host = memberHostNew m
           indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo'
-                                          , target = toWord32 123 -- TODO: FIXME
-                                          , port = toWord16 4000 -- TODO: FIXME
+                                          , target = host
+                                          , port = fromIntegral port
                                           , node = "wat" }
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes

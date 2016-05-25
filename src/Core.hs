@@ -1,24 +1,25 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Core where
 
 import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (race)
+import           Control.Concurrent.Async (race, race_)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception.Base (bracket)
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity
-import           Control.Monad.Trans.Class (lift)
+import           Control.Monad.Trans.Either (EitherT(..), left, right, hoistEither, runEitherT)
 import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
 import           Data.Conduit
 import qualified Data.Conduit.Combinators as CC (map, omapE, print, stdout, sinkNull)
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
-                                                     sinkToSocket, sourceSocket)
-import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
+import           Data.Conduit.Network.UDP (sinkToSocket, sourceSocket)
+import qualified Data.Conduit.Network.UDP as UDP (Message (..))
+import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan, readTMChan)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
 import           Data.Foldable (find)
@@ -68,9 +69,6 @@ nextIncarnation' s n = do
   else
      writeTVar (storeIncarnation s) inc' >> return inc'
 
-aliveMembers :: [Member] -> [Member]
-aliveMembers = filter isAlive
-
 removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
   modifyTVar' (storeMembers s) $ Map.filter (not . isDead)
@@ -95,7 +93,7 @@ waitForAckOf (AckChan chan seqNo') =
   sourceTMChan chan $$ ackOf (fromIntegral seqNo') =$ CC.sinkNull >> return ()
   where
     ackOf s = awaitForever $ \ackSeqNo ->
-      if s == ackSeqNo then return () else ackOf s
+      unless (s == ackSeqNo) $ ackOf s
 
 members :: Store -> STM [Member]
 members s = Map.elems <$> readTVar (storeMembers s)
@@ -113,7 +111,7 @@ handleAck store seqNo' = atomically $ writeTMChan (storeAckHandler store) seqNo'
 handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
 handleTCPMessage store sockAddr = awaitForever $ \req ->
   case process req of
-    Left _ -> return () -- FIXME: log it
+    Left _ -> return () -- FIXME: log it trace/debug?
     Right out -> yield out
 
   where process req = do
@@ -163,24 +161,43 @@ handleUDPMessage store = awaitForever $ \req ->
 -- disseminate receives messages for broadcasting to other members
 -- messages other than Ping/IndirectPing/Ack are enqueued for piggy-backing
 -- while ping/indirect-ping/ack are immediately sent
-disseminate :: Store -> TMChan (Message, SockAddr) -> IO ()
-disseminate store chan = undefined
-  -- UDP.sinkToSocket udpSocket
+disseminate :: Store -> Conduit Gossip IO UDP.Message
+disseminate store = awaitForever $ \(Gossip msg addr) ->
+
+  -- FIXME: again, I need GADT or fix my message type so I can match using |
+  -- send ping/indirect-ping/ack immediately and enqueue everything else
+  case msg of
+    Ping{..} -> send msg addr
+    Ack{..} -> send msg addr
+    IndirectPing{..} -> send msg addr
+    _ -> enqueue msg addr
+
+  where send msg addr =
+          yield $ UDP.Message (encode msg) addr
+
+        -- FIXME: need to add priority queue and then have send pull from that to create compound msg
+        enqueue msg addr =
+          return ()
 
 main :: IO ()
 main = do
-    let config = either error id parseConfig
-    self <- makeSelf config
-    store <- makeStore self
+  (config, store, self) <- configure >>= either error return
+  _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
 
-    _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
-    gossipChan <- newTMChanIO
+  -- sendAndReceiveState
+  -- _ <- forkIO $ runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
+  --        appSource client $$ handleTCPMessage store (appSockAddr client) $= appSink client
 
-    forkIO $
-      runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
-        appSource client $$ handleTCPMessage store (appSockAddr client) =$ appSink client
+  gossip <- newTMChanIO
 
-    -- sendAndReceiveState
-    withSocket (bindUDP "127.0.0.1" 4000) $ \udpSocket -> do
-      -- forkIO $ disseminator store udpSocket gossipChan
-      UDP.sourceSocket udpSocket 65335 $$ handleUDPMessage store $= sinkTMChan gossipChan False
+  withSocket (bindUDP "127.0.0.1" 4000) $ \sock -> do
+    -- use concurrently or mapM_ ?
+    _ <- failureDetector config store gossip
+    race_ (disseminate' store gossip sock)
+          (listen store gossip sock)
+
+  where disseminate' s chan sock =
+          sourceTMChan chan $$ disseminate s $= sinkToSocket sock
+
+        listen s chan sock =
+          sourceSocket sock 65335 $$ mapOutput toGossip (handleUDPMessage s) $= sinkTMChan chan False

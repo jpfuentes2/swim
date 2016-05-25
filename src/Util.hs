@@ -6,6 +6,8 @@ import           Control.Concurrent (threadDelay)
 import           Control.Concurrent.STM (atomically)
 import           Control.Concurrent.STM.TVar (newTVarIO, readTVar)
 import           Control.Exception.Base (bracket)
+import           Control.Monad.Trans (liftIO, lift)
+import           Control.Monad.Trans.Either (EitherT(..), left, right, hoistEither, runEitherT)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
@@ -15,6 +17,7 @@ import qualified Data.Map.Strict as Map (empty)
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Monoid ((<>))
 import           Data.Streaming.Network (getSocketUDP)
+import           Data.Time.Calendar
 import           Data.Time.Clock (UTCTime(..), getCurrentTime)
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket (Socket, close, setSocketOption, SocketOption(ReuseAddr), bind, addrAddress)
@@ -97,16 +100,17 @@ bindUDP host port = do
     setSocketOption sock ReuseAddr 1
     bind sock (addrAddress info) >> return sock
 
+-- FIXME: move to show instance
 dumpStore :: Store -> IO ()
 dumpStore s = do
-  (_seqNo, inc, membs, self) <- atomically $ do
+  (_seqNo, i, ms, self) <- atomically $ do
     _seqNo <- readTVar $ storeSeqNo s
-    inc <- readTVar $ storeIncarnation s
-    membs <- readTVar $ storeMembers s
-    return (seqNo, inc, membs, storeSelf s)
+    i <- readTVar $ storeIncarnation s
+    ms <- readTVar $ storeMembers s
+    return (_seqNo, i, ms, storeSelf s)
 
-  --print $ "(seqNo, inc) " <> show (_seqNo, inc)
-  print $ "members: " <> show membs
+  print $ "(seqNo, inc) " <> show (_seqNo, i)
+  print $ "members: " <> show ms
   print $ "self: " <> show self
 
 decodeMsgType :: BS.ByteString -> Either Error (BS.ByteString, MsgType)
@@ -132,13 +136,23 @@ makeStore self = do
                       }
     return store
 
-makeSelf :: Config -> IO Member
-makeSelf _ = do
-    now <- getCurrentTime
-    return Member { memberName = "myself"
-                  , memberHost = "localhost"
-                  , memberHostNew = SockAddrInet 123 4000
-                  , memberAlive = IsAlive
-                  , memberIncarnation = 0
-                  , memberLastChange = now
-                  }
+makeSelf :: Config -> Member
+makeSelf _ =
+  Member { memberName = "myself"
+         , memberHost = "localhost"
+         , memberHostNew = SockAddrInet 123 4000
+         , memberAlive = IsAlive
+         , memberIncarnation = 0
+         , memberLastChange = UTCTime (ModifiedJulianDay 0) 0
+         }
+
+configure :: IO (Either Error (Config, Store, Member))
+configure = runEitherT $ do
+  cfg <- hoistEither parseConfig
+  self <- right (makeSelf cfg)
+  store <- liftIO $ makeStore self
+  return (cfg, store, self)
+
+-- FIXME: delete me once we've solved expression problem
+toGossip :: (Message, SockAddr) -> Gossip
+toGossip (msg, addr) = Gossip msg addr
