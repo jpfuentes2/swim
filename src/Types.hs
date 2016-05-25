@@ -1,11 +1,16 @@
-{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Types where
-
+import           Control.Monad (replicateM)
+import           Control.Cond (unlessM)
 import           Control.Concurrent.STM.TVar
+import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Aeson.Types
-import           Data.ByteString ( ByteString )
+import           Control.Monad.Identity (unless)
+import qualified Data.ByteString as BS (length)
 import qualified Data.Conduit.Network.UDP as UDP ( Message(..) )
 import           Data.Conduit.TMChan (TMChan(..))
 import           Data.Foldable (asum)
@@ -13,16 +18,22 @@ import           Data.List.NonEmpty ( NonEmpty(..) )
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map.Strict as Map
 import           Data.Monoid ( (<>) )
-import           Data.Serialize (Serialize, encode, putWord8, putWord16be, putByteString)
+import           Data.Typeable (typeOf)
+import           Data.Serialize (Serialize, encode, putWord8, putWord16be, putByteString, getWord8, remaining,
+                                 isolate, getWord16be, get, putLazyByteString, put, getLazyByteString)
 import           Data.Time.Clock ( UTCTime(..) )
 import           Data.Traversable (mapM)
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket.Internal (SockAddr)
 
+type Microseconds = Int
+
 type Error = String
 
 -- replace with SockAddr
 type Host = String
+
+data Gossip = Gossip Message SockAddr
 
 data Config = Config { bindHost :: String
                      , joinHost :: String
@@ -74,7 +85,7 @@ instance Serialize Envelope where
     putWord8 . fromIntegral . length $ msgs
     let encodedMsgs = map encode msgs
     mapM_ (putWord16be . fromIntegral . BS.length) encodedMsgs
-    mapM_ putByteString msgs
+    mapM_ putByteString encodedMsgs
 
   get = do
     typ <- fromIntegral <$> getWord8
@@ -129,8 +140,6 @@ instance Serialize Message where
     lbs <- getLazyByteString =<< remaining
     maybe (fail . ("Could not parse " <>) . show) return . unpackAeson $ lbs
 
-data InternalMessage = Gossip [Member] | Nada
-
 newtype AckResponse = AckResponse Word32
 
 data AckChan = AckChan (TMChan Word32) Word32
@@ -156,7 +165,7 @@ msgIndex m = case m of
   Alive{..} -> fromIntegral $ fromEnum AliveMsg
   Dead{..} -> fromIntegral $ fromEnum DeadMsg
   PushPull{..} -> fromIntegral $ fromEnum PushPullMsg
-  Compound _ -> fromIntegral $ fromEnum CompoundMsg
+  -- Compound _ -> fromIntegral $ fromEnum CompoundMsg
 
 instance FromJSON Message where
   parseJSON = withObject "message" $ \o -> asum [

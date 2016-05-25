@@ -1,15 +1,17 @@
-{-# LANGUAGE LambaCase, OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Core where
 
 import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (race)
+import           Control.Concurrent.Async (race, race_)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception.Base (bracket)
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity
-import           Control.Monad.Trans.Class (lift)
+import           Control.Monad.Trans.Either (EitherT(..), left, right, hoistEither, runEitherT)
 import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
@@ -17,9 +19,9 @@ import           Data.Conduit (($$), (=$=), awaitForever, yield)
 import           Data.Conduit.Cereal (conduitGet)
 import qualified Data.Conduit.Combinators as CC
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import qualified Data.Conduit.Network.UDP    as UDP (Message (..), msgSender,
-                                                     sinkToSocket, sourceSocket)
-import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
+import           Data.Conduit.Network.UDP (sinkToSocket, sourceSocket)
+import qualified Data.Conduit.Network.UDP as UDP (Message (..))
+import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan, readTMChan)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
 import           Data.Foldable (find)
@@ -70,9 +72,6 @@ nextIncarnation' s n = do
   else
      writeTVar (storeIncarnation s) inc' >> return inc'
 
-aliveMembers :: [Member] -> [Member]
-aliveMembers = filter isAlive
-
 removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
   modifyTVar (storeMembers s) $ Map.filter (not . isDead)
@@ -97,7 +96,7 @@ waitForAckOf (AckChan chan seqNo') =
   sourceTMChan chan $$ ackOf (fromIntegral seqNo') =$ CC.sinkNull >> return ()
   where
     ackOf s = awaitForever $ \ackSeqNo ->
-      if s == ackSeqNo then return () else ackOf s
+      unless (s == ackSeqNo) $ ackOf s
 
 members :: Store -> STM [Member]
 members s = Map.elems <$> readTVar (storeMembers s)
@@ -122,8 +121,7 @@ handleTCPMessage store sockAddr =
       PushPull _ _ _       -> fail "FIXME PushPull"
       unexpected           -> fail $ "unexpected TCP message " <> show unexpected
 
--- FIXME: handle compound messages
-handleUDPMessage :: Store -> Conduit UDP.Message IO (Message, SockAddr)
+handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
 handleUDPMessage store =
   mapC decode =$= handleDecodeErrors =$= CC.concat =$= mapM_C process =$= CC.concat
   where
@@ -140,7 +138,7 @@ handleUDPMessage store =
       -- respond with Ack if the ping was meant for us
       Ping seqNo' node'
         | node' == memberName (storeSelf store) ->
-          return [(Ack {seqNo = seqNo', payload = []}, UDP.msgSender req)]
+          return [Gossip (Ack {seqNo = seqNo', payload = []}, UDP.msgSender req)]
         | otherwise ->
           return []
 
@@ -148,37 +146,43 @@ handleUDPMessage store =
       -- and create ack handler which relays ack from target to original requester
       IndirectPing seqNo' target' port' node' -> do
         next <- liftIO $ nextIncarnation store
-        return [ (Ping { seqNo = fromIntegral next
+        return [ Gossip (Ping { seqNo = fromIntegral next
                        , node = node' }
                  , SockAddrInet (fromIntegral port') target') ]
 
--- disseminator takes care of gossiping messages from both
--- acks received from the ackHandler chan and broadcast requests
--- to a member using our UDP socket
-disseminator :: Store -> Socket -> TMChan (Message, SockAddr) -> IO ()
-disseminator store socket chan = undefined
-  -- UDP.sinkToSocket udpSocket
+-- disseminate receives messages for broadcasting to other members
+-- messages other than Ping/IndirectPing/Ack are enqueued for piggy-backing
+-- while ping/indirect-ping/ack are immediately sent
+disseminate :: Store -> Conduit Gossip IO UDP.Message
+disseminate store = awaitForever $ \(Gossip msg addr) ->
+
+  -- FIXME: again, I need GADT or fix my message type so I can match using |
+  -- send ping/indirect-ping/ack immediately and enqueue everything else
+  case msg of
+    Ping{..} -> send msg addr
+    Ack{..} -> send msg addr
+    IndirectPing{..} -> send msg addr
+    _ -> enqueue msg addr
+
+  where send msg addr =
+          yield $ UDP.Message (encode msg) addr
+
+        -- FIXME: need to add priority queue and then have send pull from that to create compound msg
+        enqueue msg addr =
+          return ()
 
 main :: IO ()
 main = do
-  now <- getCurrentTime
-  let self = Member { memberName = "myself"
-                    , memberHost = "localhost"
-                    , memberHostNew = SockAddrInet 123 4000
-                    , memberAlive = IsAlive
-                    , memberIncarnation = 0
-                    , memberLastChange = now
-                    }
-  store <- makeStore self
+  (config, store, self) <- configure >>= either error return
   _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
-  gossipChan <- newTMChanIO
+  gossip <- newTMChanIO
 
-  withSocket (bindUDP "127.0.0.1" 4000) $ \ udpSocket ->
+  withSocket (bindUDP "127.0.0.1" 4000) $ \sock -> do
     let tcpServer =
           runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
             appSource client $$ handleTCPMessage store (appSockAddr client) =$= appSink client
-        udpSender =
-          sourceTMChan gossipChan $$ UDP.sinkToSocket udpSocket
-        udpReceiver =
+        disseminate' =
+          sourceTMChan gossipChan $$ disseminate s $= sinkToSocket sock
+        udpFlow =
           UDP.sourceSocket udpSocket 65535 $$ handleUDPMessage store =$= sinkTMChan gossipChan False
-    in tcpServer `race_` udpSender `race_` udpReceiver
+    in tcpServer `race_` udpReceiver `race_` disseminate'
