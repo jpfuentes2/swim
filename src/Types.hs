@@ -5,7 +5,6 @@
 
 module Types where
 import           Control.Monad (replicateM)
-import           Control.Cond (unlessM)
 import           Control.Concurrent.STM.TVar
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
 import           Data.Aeson.Types
@@ -95,7 +94,9 @@ instance Serialize Envelope where
     case toEnum typ of
       CompoundMsg -> do
         numMsgs <- fromIntegral <$> getWord8
-        unlessM ((>= (numMsgs * 2)) . remaining) $
+        bytesLeft <- remaining
+        unless (bytesLeft >= (numMsgs * 2)) $
+        -- unlessM ((>= (numMsgs * 2)) . remaining) $
           fail "compound message is truncated"
           NEL.nonEmpty . map fromIntegral <$> replicateM numMsgs getWord16be >>= \ case
             Just lengths -> Envelope <$> mapM (`isolate` get) lengths
