@@ -25,53 +25,7 @@ import           Network.Socket (Socket, close, setSocketOption, SocketOption(Re
 import           System.Random (getStdRandom, randomR)
 import           Types
 
-<<<<<<< 17b138b7450fbc119457a86ef5ccfef15ca0252d
 type Microseconds = Int
-
-seconds :: Int -> Microseconds
-=======
-toWord8 :: Int -> Word8
-toWord8 n = fromIntegral n :: Word8
-
-toWord16 :: Int -> Word16
-toWord16 n = fromIntegral n :: Word16
-
-toWord32 :: Int -> Word32
-toWord32 n = fromIntegral n :: Word32
-
-encode :: Message -> BS.ByteString
-encode = toStrict . packAeson
-
--- FIXME: reduce list traversal please
--- | msg type | num msgs | len of each msg |
--- |---------------------------------------|
--- |                body                   |
-encodeCompound :: [Message] -> BS.ByteString
-encodeCompound msgs =
-  let (msgIdx, numMsgs) = (toWord8 $ fromEnum CompoundMsg, toWord8 $ length msgs)
-      encoded = map encode msgs
-      msgLengths = foldl (\b msg -> b <> BSB.word16BE (toWord16 $ BS.length msg)) mempty encoded
-      header = BS.pack [msgIdx, numMsgs] <> toStrict (BSB.toLazyByteString msgLengths)
-  in BS.append header $ BS.concat encoded
-
-decode :: BS.ByteString -> Either Error Message
-decode bs = maybe err Right (unpackAeson $ fromStrict bs)
-  where err = Left $ "Could not parse " <> show bs
-
-decodeCompound :: BS.ByteString -> Either Error [Message]
-decodeCompound bs = do
-  (numMsgs, rest) <- maybe (Left "missing compound length byte") Right $ BS.uncons bs
-  _ <- if BS.length rest < fromIntegral numMsgs * 2 then
-         Left "compound message is truncated"
-       else
-         Right ()
-  -- let lengths =
-
-  Right []
-
-seconds :: Int -> Second
->>>>>>> Using concurrently
-seconds = (1000000 *)
 
 after :: Microseconds -> IO UTCTime
 after mics = do
@@ -118,23 +72,8 @@ dumpStore s = do
   print $ "members: " <> show ms
   print $ "self: " <> show self
 
-<<<<<<< 17b138b7450fbc119457a86ef5ccfef15ca0252d
-decodeMsgType :: BS.ByteString -> Either Error (MsgType, BS.ByteString)
-decodeMsgType =
-  runGet $ do
-    typ <- fromIntegral <$> getWord8
-    left <- remaining
-    return (toEnum typ, getByteString left)
-=======
-decodeMsgType :: BS.ByteString -> Either Error (BS.ByteString, MsgType)
-decodeMsgType bs = maybe (Left "cannot decode type of empty msg") toMsgType $ BS.uncons bs
-  where toMsgType (w8, bs) =
-          Right (bs, toEnum (fromIntegral w8 :: Int))
->>>>>>> Using concurrently
-
 makeStore :: Member -> IO Store
 makeStore self = do
-<<<<<<< 858bae99e9eaeb26a0cc4fe1e4e64cbf3e267b15
   mems <- newTVarIO Map.empty
   -- num <- newTVarIO 0
   events <- newTVarIO []
@@ -149,21 +88,6 @@ makeStore self = do
                     -- , storeNumMembers = num
                     }
   return store
-=======
-    mems <- newTVarIO Map.empty
-    -- num <- newTVarIO 0
-    events <- newTVarIO []
-    seqNo <- newTVarIO 0
-    inc <- newTVarIO 0
-    ackHandler <- newTMChanIO
-    let store = Store { storeSeqNo = seqNo
-                      , storeIncarnation = inc
-                      , storeMembers = mems
-                      , storeSelf = self
-                      , storeAckHandler = ackHandler
-                      -- , storeNumMembers = num
-                      }
-    return store
 
 makeSelf :: Config -> Member
 makeSelf _ =
@@ -181,8 +105,3 @@ configure = runEitherT $ do
   self <- right (makeSelf cfg)
   store <- liftIO $ makeStore self
   return (cfg, store, self)
-
--- FIXME: delete me once we've solved expression problem
-toGossip :: (Message, SockAddr) -> Gossip
-toGossip (msg, addr) = Gossip msg addr
->>>>>>> Structure is coming together and waste gone
