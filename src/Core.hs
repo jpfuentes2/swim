@@ -5,7 +5,7 @@
 module Core where
 
 import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (race, race_)
+import           Control.Concurrent.Async (Concurrently(..), runConcurrently, race)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception.Base (bracket)

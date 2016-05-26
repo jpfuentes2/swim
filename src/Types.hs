@@ -29,6 +29,8 @@ type Microseconds = Int
 
 type Error = String
 
+type Second = Int
+
 -- replace with SockAddr
 type Host = String
 
