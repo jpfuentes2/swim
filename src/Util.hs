@@ -19,6 +19,9 @@ import           Network.Socket (Socket, SockAddr(SockAddrInet), close, setSocke
 import           System.Random (getStdRandom, randomR)
 import           Types
 
+seconds :: Int -> Microseconds
+seconds = (1000000 *)
+
 after :: Microseconds -> IO UTCTime
 after mics = do
   threadDelay mics

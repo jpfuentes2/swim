@@ -290,7 +290,7 @@ main = do
           runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
             appSource client $$ handleTCPMessage store (appSockAddr client) =$= appSink client
         disseminate' =
-          sourceTMChan gossip $$ disseminate s =$= sinkToSocket sock
-        udpFlow =
+          sourceTMChan gossip $$ disseminate store =$= sinkToSocket sock
+        udpReceiver =
           UDP.sourceSocket sock 65535 $$ handleUDPMessage store =$= sinkTMChan gossip False
     in tcpServer `race_` udpReceiver `race_` disseminate'
