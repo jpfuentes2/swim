@@ -5,36 +5,27 @@
 
 module Core where
 
-import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (Concurrently(..), runConcurrently, race_)
-import           Control.Concurrent.STM (STM(..), atomically)
+import           Control.Concurrent.Async (race_)
+import           Control.Concurrent.STM (STM, atomically)
 import           Control.Concurrent.STM.TVar
-import           Control.Exception.Base (bracket)
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity
-import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
-import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
-import           Data.ByteString.Lazy (fromStrict, toStrict)
+import qualified Data.ByteString as BS
 import           Data.Conduit (Conduit, ConduitM, ($$), (=$=), awaitForever, yield)
 import           Data.Conduit.Cereal (conduitGet)
 import qualified Data.Conduit.Combinators as CC
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import           Data.Conduit.Network.UDP (sinkToSocket, sourceSocket)
+import           Data.Conduit.Network.UDP (sinkToSocket)
 import qualified Data.Conduit.Network.UDP as UDP
-import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan, readTMChan)
-import           Data.Either (Either (..))
-import           Data.Either.Combinators (mapLeft)
+import           Data.Conduit.TMChan (TMChan, sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
 import           Data.Foldable (find)
-import qualified Data.Map.Strict             as Map (elems, empty, filter,
-                                                     lookup, insert)
-import           Data.Maybe (fromMaybe)
+import qualified Data.List.NonEmpty as NEL
+import qualified Data.Map.Strict as Map
 import           Data.Monoid ((<>))
-import           Data.Serialize (decode, encode)
-import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
-import           Data.Time.Clock (UTCTime (..), getCurrentTime)
-import           Data.Word (Word16, Word32, Word8)
+import           Data.Serialize (decode, encode, get)
+import           Data.Time.Clock (getCurrentTime)
+import           Data.Word (Word16, Word32)
 import           Network.Socket as NS
-import           Network.Socket.Internal     (HostAddress, SockAddr (SockAddrInet))
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
 import           Types
