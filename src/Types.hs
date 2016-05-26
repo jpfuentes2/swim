@@ -11,17 +11,15 @@ import           Data.Aeson.Types
 import           Control.Monad.Identity (unless)
 import qualified Data.ByteString as BS (length)
 import qualified Data.Conduit.Network.UDP as UDP ( Message(..) )
-import           Data.Conduit.TMChan (TMChan(..))
+import           Data.Conduit.TMChan (TMChan)
 import           Data.Foldable (asum)
 import           Data.List.NonEmpty ( NonEmpty(..) )
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map.Strict as Map
 import           Data.Monoid ( (<>) )
-import           Data.Typeable (typeOf)
 import           Data.Serialize (Serialize, encode, putWord8, putWord16be, putByteString, getWord8, remaining,
                                  isolate, getWord16be, get, putLazyByteString, put, getLazyByteString)
 import           Data.Time.Clock ( UTCTime(..) )
-import           Data.Traversable (mapM)
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket.Internal (SockAddr)
 
@@ -74,13 +72,13 @@ data Liveness = IsAlive | IsSuspect | IsDead
 
 -- |Wrapper of a series of 'Message's which are transmitted together.
 -- If a single message, then encoded alone, otherwise encoded as a compound message
-newtype Envelope = Envelope (NonEmpty Message)
+newtype Envelope = Envelope { unEnvelope :: NonEmpty Message }
 
 -- FIXME? this protocol is totally weird - includes a message type which is ignored if it's
 -- not the compound message type
 
 instance Serialize Envelope where
-  put (Envelope (msg :| [])) = putWord8 (fromIntegral . fromEnum . typeOf $ msg) >> put msg
+  put (Envelope (msg :| [])) = putWord8 (msgIndex msg) >> put msg
   put (Envelope (NEL.toList -> msgs)) = do
     putWord8 . fromIntegral . fromEnum $ CompoundMsg
     putWord8 . fromIntegral . length $ msgs
@@ -91,7 +89,7 @@ instance Serialize Envelope where
   get = do
     typ <- fromIntegral <$> getWord8
     -- FIXME? could use safe's toEnumMay or similar from errors
-    unless (typ >= 0 && typ < fromEnum maxBound) $
+    unless (typ >= 0 && typ < fromEnum (maxBound :: MsgType)) $
       fail $ "invalid message type " <> show typ
     case toEnum typ of
       CompoundMsg -> do
@@ -100,9 +98,9 @@ instance Serialize Envelope where
         unless (bytesLeft >= (numMsgs * 2)) $
         -- unlessM ((>= (numMsgs * 2)) . remaining) $
           fail "compound message is truncated"
-          NEL.nonEmpty . map fromIntegral <$> replicateM numMsgs getWord16be >>= \ case
-            Just lengths -> Envelope <$> mapM (`isolate` get) lengths
-            Nothing -> fail "compound mesage with zero messages"
+        NEL.nonEmpty . map fromIntegral <$> replicateM numMsgs getWord16be >>= \ case
+          Just lengths -> Envelope <$> mapM (`isolate` get) lengths
+          Nothing -> fail "compound mesage with zero messages"
       _ -> Envelope . (:| []) <$> get
 
 -- Messages our server understands
@@ -140,8 +138,8 @@ data Message = Ping { seqNo :: Word32
 instance Serialize Message where
   put = putLazyByteString . packAeson
   get = do
-    lbs <- getLazyByteString =<< remaining
-    maybe (fail . ("Could not parse " <>) . show) return . unpackAeson $ lbs
+    lbs <- getLazyByteString =<< fromIntegral <$> remaining
+    maybe (fail $ "Could not parse " <> show lbs) return . unpackAeson $ lbs
 
 newtype AckResponse = AckResponse Word32
 
