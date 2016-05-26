@@ -103,8 +103,8 @@ handleAck store seqNo' = atomically $ writeTMChan (storeAckHandler store) seqNo'
 -- we're not using TCP for anything other than initial state sync
 -- so we only handle pushPull / ping
 handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
-handleTCPMessage store sockAddr =
-  conduitGet =$= CC.map unEnvelope =$= CC.concat =$= CC.mapM process
+handleTCPMessage _store _sockAddr =
+  conduitGet get =$= CC.map unEnvelope =$= CC.concat =$= CC.mapM process
   where
     process :: Message -> IO BS.ByteString
     process = \ case
@@ -114,15 +114,15 @@ handleTCPMessage store sockAddr =
 
 handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
 handleUDPMessage store =
-  CC.map  =$= handleDecodeErrors =$= CC.concat =$= CC.mapM_ (uncurry process) =$= CC.concat
+  CC.map decodeUdp =$= handleDecodeErrors =$= CC.concat =$= CC.mapM (uncurry process) =$= CC.concat
   where
     decodeUdp :: UDP.Message -> Either Error [(SockAddr, Message)]
-    decodeUdp udpMsg = map (UDP.msgSender udpMsg,) . unEnvelope <$> decode (UDP.msgData udpMsg)
+    decodeUdp udpMsg = map (UDP.msgSender udpMsg,) . NEL.toList . unEnvelope <$> decode (UDP.msgData udpMsg)
 
     handleDecodeErrors :: Conduit (Either Error a) IO a
     handleDecodeErrors = awaitForever $ either fail yield
 
-    process :: SockAddr -> Message -> IO [(Message, SockAddr)]
+    process :: SockAddr -> Message -> IO [Gossip]
     process sender = \ case
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
@@ -132,17 +132,16 @@ handleUDPMessage store =
       -- respond with Ack if the ping was meant for us
       Ping seqNo' node'
         | node' == memberName (storeSelf store) ->
-          return [Gossip (Ack {seqNo = seqNo', payload = []}, sender)]
+          return [Gossip (Ack {seqNo = seqNo', payload = []}) sender]
         | otherwise ->
           return []
 
       -- send a ping to the requested target
       -- and create ack handler which relays ack from target to original requester
-      IndirectPing seqNo' target' port' node' -> do
+      IndirectPing _seqNo' target' port' node' -> do
         next <- liftIO $ nextIncarnation store
-        return [ Gossip (Ping { seqNo = fromIntegral next
-                       , node = node' }
-                 , SockAddrInet (fromIntegral port') target') ]
+        return [ Gossip (Ping { seqNo = fromIntegral next, node = node' })
+                        (SockAddrInet (fromIntegral port') target') ]
 
 -- disseminate receives messages for gossiping to other members
 -- ping/indirect-ping
