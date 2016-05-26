@@ -14,7 +14,7 @@ import           Control.Monad.Identity
 import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
-import           Data.Conduit (($$), (=$=), awaitForever, yield)
+import           Data.Conduit (Conduit, ($$), (=$=), awaitForever, yield)
 import           Data.Conduit.Cereal (conduitGet)
 import qualified Data.Conduit.Combinators as CC
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
@@ -92,7 +92,7 @@ kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
 -- gossip/schedule
 waitForAckOf :: AckChan -> IO ()
 waitForAckOf (AckChan chan seqNo') =
-  sourceTMChan chan $$ ackOf (fromIntegral seqNo') =$ CC.sinkNull >> return ()
+  sourceTMChan chan $$ ackOf (fromIntegral seqNo') =$= CC.sinkNull >> return ()
   where
     ackOf s = awaitForever $ \ackSeqNo ->
       unless (s == ackSeqNo) $ ackOf s
@@ -122,7 +122,7 @@ handleTCPMessage store sockAddr =
 
 handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
 handleUDPMessage store =
-  mapC decode =$= handleDecodeErrors =$= CC.concat =$= mapM_C process =$= CC.concat
+  CC.map decode =$= handleDecodeErrors =$= CC.concat =$= CC.mapM_ process =$= CC.concat
   where
     handleDecodeErrors :: Conduit (Either Error a) IO a
     handleDecodeErrors = awaitForever $ either fail yield
