@@ -38,7 +38,7 @@ toWord32 n = fromIntegral n :: Word32
 encode :: Message -> BS.ByteString
 encode = toStrict . packAeson
 
--- TODO: reduce list traversal please
+-- FIXME: reduce list traversal please
 -- | msg type | num msgs | len of each msg |
 -- |---------------------------------------|
 -- |                body                   |
@@ -65,15 +65,13 @@ decodeCompound bs = do
 
   Right []
 
-type Second = Int
-
 seconds :: Int -> Second
 seconds = (1000000 *)
 
 after :: Second -> IO UTCTime
 after = return getCurrentTime . threadDelay
 
--- O(N^2) Fisher-Yates shuffle. it's okay our lists are small for now
+-- FIXME: O(N^2) Fisher-Yates shuffle. it's okay b/c our lists are small for now
 shuffle :: [a] -> IO [a]
 shuffle [] = return []
 shuffle as = do
@@ -114,10 +112,9 @@ dumpStore s = do
   print $ "self: " <> show self
 
 decodeMsgType :: BS.ByteString -> Either Error (BS.ByteString, MsgType)
-decodeMsgType bs = do
-  n <- if BS.null bs then Left "empty msg" else Right $ BS.head bs
-  -- FIXME: make me safe
-  Right (BS.drop 1 bs, toEnum (fromIntegral n :: Int))
+decodeMsgType bs = maybe (Left "cannot decode type of empty msg") toMsgType $ BS.uncons bs
+  where toMsgType (w8, bs) =
+          Right (bs, toEnum (fromIntegral w8 :: Int))
 
 makeStore :: Member -> IO Store
 makeStore self = do

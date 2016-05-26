@@ -18,6 +18,8 @@ import           Network.Socket.Internal (SockAddr)
 
 type Error = String
 
+type Second = Int
+
 -- replace with SockAddr
 type Host = String
 

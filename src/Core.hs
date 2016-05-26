@@ -4,7 +4,7 @@
 module Core where
 
 import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (race, race_)
+import           Control.Concurrent.Async (Concurrently(..), runConcurrently, race)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception.Base (bracket)
@@ -298,11 +298,11 @@ main = do
 
   gossip <- newTMChanIO
 
-  withSocket (bindUDP "127.0.0.1" 4000) $ \sock -> do
-    -- use concurrently or mapM_ ?
-    _ <- failureDetector config store gossip
-    race_ (disseminate' store gossip sock)
-          (listen store gossip sock)
+  withSocket (bindUDP "127.0.0.1" 4000) $ \sock ->
+    runConcurrently $
+      Concurrently (disseminate' store gossip sock) *>
+      Concurrently (listen store gossip sock) *>
+      Concurrently (failureDetector config store gossip)
 
   where disseminate' s chan sock =
           sourceTMChan chan $$ disseminate s $= sinkToSocket sock
