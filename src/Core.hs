@@ -148,7 +148,7 @@ handleUDPMessage store =
 -- messages other than Ping/IndirectPing/Ack are enqueued for piggy-backing
 -- while ping/indirect-ping/ack are immediately sent
 disseminate :: Store -> Conduit Gossip IO UDP.Message
-disseminate store = awaitForever $ \(Gossip msg addr) ->
+disseminate _store = awaitForever $ \(Gossip msg addr) ->
 
   -- FIXME: again, I need GADT or fix my message type so I can match using |
   -- send ping/indirect-ping/ack immediately and enqueue everything else
@@ -162,7 +162,7 @@ disseminate store = awaitForever $ \(Gossip msg addr) ->
           yield $ UDP.Message (encode msg) addr
 
         -- FIXME: need to add priority queue and then have send pull from that to create compound msg
-        enqueue msg addr =
+        enqueue _msg _addr =
           return ()
 
 -- TODO: need a timer to mark this node as dead after suspect timeout
@@ -239,10 +239,10 @@ probeNode cfg s m seqNo' ackWaiter = do
     -- send IndirectPing to kRandomNodes
     Left _ -> do
       let SockAddrInet port host = memberHostNew m
-          indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo'
-                                          , target = host
-                                          , port = fromIntegral port
-                                          , node = "wat" }
+          indirectPing _mem = IndirectPing { seqNo = fromIntegral seqNo'
+                                           , target = host
+                                           , port = fromIntegral port
+                                           , node = "wat" }
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes
       ack <- liftIO ackWaiter
@@ -256,12 +256,12 @@ probeNode cfg s m seqNo' ackWaiter = do
           maybe (return ()) yield suspect
 
 failureDetector :: Config -> Store -> TMChan Gossip -> IO ()
-failureDetector cfg s gossip =
+failureDetector cfg s _gossip =
     loop
   where
     loop = do
         _ <- after $ seconds 5
-        members <- kRandomNodesExcludingSelf cfg s
+        _members <- kRandomNodesExcludingSelf cfg s
 
         -- mapM_ (\node -> do
           -- make a seqNo'
@@ -275,7 +275,7 @@ failureDetector cfg s gossip =
 
 main :: IO ()
 main = do
-  (config, store, self) <- configure >>= either error return
+  (_config, store, _self) <- configure >>= either error return
   _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
   gossip <- newTMChanIO
 
