@@ -1,39 +1,31 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
 
 module Core where
 
-import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (Concurrently(..), runConcurrently, race_)
-import           Control.Concurrent.STM (STM(..), atomically)
+import           Control.Concurrent.Async (race_)
+import           Control.Concurrent.STM (STM, atomically)
 import           Control.Concurrent.STM.TVar
-import           Control.Exception.Base (bracket)
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity
-import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
-import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
-import           Data.ByteString.Lazy (fromStrict, toStrict)
+import qualified Data.ByteString as BS
 import           Data.Conduit (Conduit, ConduitM, ($$), (=$=), awaitForever, yield)
 import           Data.Conduit.Cereal (conduitGet)
 import qualified Data.Conduit.Combinators as CC
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import           Data.Conduit.Network.UDP (sinkToSocket, sourceSocket)
+import           Data.Conduit.Network.UDP (sinkToSocket)
 import qualified Data.Conduit.Network.UDP as UDP
-import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan, readTMChan)
-import           Data.Either (Either (..))
-import           Data.Either.Combinators (mapLeft)
+import           Data.Conduit.TMChan (TMChan, sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
 import           Data.Foldable (find)
-import qualified Data.Map.Strict             as Map (elems, empty, filter,
-                                                     lookup, insert)
-import           Data.Maybe (fromMaybe)
+import qualified Data.List.NonEmpty as NEL
+import qualified Data.Map.Strict as Map
 import           Data.Monoid ((<>))
-import           Data.Serialize (decode, encode)
-import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
-import           Data.Time.Clock (UTCTime (..), getCurrentTime)
-import           Data.Word (Word16, Word32, Word8)
+import           Data.Serialize (decode, encode, get)
+import           Data.Time.Clock (getCurrentTime)
+import           Data.Word (Word16, Word32)
 import           Network.Socket as NS
-import           Network.Socket.Internal     (HostAddress, SockAddr (SockAddrInet))
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
 import           Types
@@ -111,8 +103,8 @@ handleAck store seqNo' = atomically $ writeTMChan (storeAckHandler store) seqNo'
 -- we're not using TCP for anything other than initial state sync
 -- so we only handle pushPull / ping
 handleTCPMessage :: Store -> SockAddr -> Conduit BS.ByteString IO BS.ByteString
-handleTCPMessage store sockAddr =
-  conduitGet =$= CC.map unEnvelope =$= CC.concat =$= CC.mapM process
+handleTCPMessage _store _sockAddr =
+  conduitGet get =$= CC.map unEnvelope =$= CC.concat =$= CC.mapM process
   where
     process :: Message -> IO BS.ByteString
     process = \ case
@@ -122,13 +114,16 @@ handleTCPMessage store sockAddr =
 
 handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
 handleUDPMessage store =
-  CC.map decode =$= handleDecodeErrors =$= CC.concat =$= CC.mapM_ process =$= CC.concat
+  CC.map decodeUdp =$= handleDecodeErrors =$= CC.concat =$= CC.mapM (uncurry process) =$= CC.concat
   where
+    decodeUdp :: UDP.Message -> Either Error [(SockAddr, Message)]
+    decodeUdp udpMsg = map (UDP.msgSender udpMsg,) . NEL.toList . unEnvelope <$> decode (UDP.msgData udpMsg)
+
     handleDecodeErrors :: Conduit (Either Error a) IO a
     handleDecodeErrors = awaitForever $ either fail yield
 
-    process :: Message -> IO [(Message, SockAddr)]
-    process = \ case
+    process :: SockAddr -> Message -> IO [Gossip]
+    process sender = \ case
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
         liftIO $ handleAck store seqNo'
@@ -137,24 +132,23 @@ handleUDPMessage store =
       -- respond with Ack if the ping was meant for us
       Ping seqNo' node'
         | node' == memberName (storeSelf store) ->
-          return [Gossip (Ack {seqNo = seqNo', payload = []}, UDP.msgSender req)]
+          return [Gossip (Ack {seqNo = seqNo', payload = []}) sender]
         | otherwise ->
           return []
 
       -- send a ping to the requested target
       -- and create ack handler which relays ack from target to original requester
-      IndirectPing seqNo' target' port' node' -> do
+      IndirectPing _seqNo' target' port' node' -> do
         next <- liftIO $ nextIncarnation store
-        return [ Gossip (Ping { seqNo = fromIntegral next
-                       , node = node' }
-                 , SockAddrInet (fromIntegral port') target') ]
+        return [ Gossip (Ping { seqNo = fromIntegral next, node = node' })
+                        (SockAddrInet (fromIntegral port') target') ]
 
 -- disseminate receives messages for gossiping to other members
 -- ping/indirect-ping
 -- messages other than Ping/IndirectPing/Ack are enqueued for piggy-backing
 -- while ping/indirect-ping/ack are immediately sent
 disseminate :: Store -> Conduit Gossip IO UDP.Message
-disseminate store = awaitForever $ \(Gossip msg addr) ->
+disseminate _store = awaitForever $ \(Gossip msg addr) ->
 
   -- FIXME: again, I need GADT or fix my message type so I can match using |
   -- send ping/indirect-ping/ack immediately and enqueue everything else
@@ -168,7 +162,7 @@ disseminate store = awaitForever $ \(Gossip msg addr) ->
           yield $ UDP.Message (encode msg) addr
 
         -- FIXME: need to add priority queue and then have send pull from that to create compound msg
-        enqueue msg addr =
+        enqueue _msg _addr =
           return ()
 
 -- TODO: need a timer to mark this node as dead after suspect timeout
@@ -245,10 +239,10 @@ probeNode cfg s m seqNo' ackWaiter = do
     -- send IndirectPing to kRandomNodes
     Left _ -> do
       let SockAddrInet port host = memberHostNew m
-          indirectPing mem = IndirectPing { seqNo = fromIntegral seqNo'
-                                          , target = host
-                                          , port = fromIntegral port
-                                          , node = "wat" }
+          indirectPing _mem = IndirectPing { seqNo = fromIntegral seqNo'
+                                           , target = host
+                                           , port = fromIntegral port
+                                           , node = "wat" }
       randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
       mapM_ (yield . indirectPing) randomNodes
       ack <- liftIO ackWaiter
@@ -262,12 +256,12 @@ probeNode cfg s m seqNo' ackWaiter = do
           maybe (return ()) yield suspect
 
 failureDetector :: Config -> Store -> TMChan Gossip -> IO ()
-failureDetector cfg s gossip =
+failureDetector cfg s _gossip =
     loop
   where
     loop = do
         _ <- after $ seconds 5
-        members <- kRandomNodesExcludingSelf cfg s
+        _members <- kRandomNodesExcludingSelf cfg s
 
         -- mapM_ (\node -> do
           -- make a seqNo'
@@ -281,7 +275,7 @@ failureDetector cfg s gossip =
 
 main :: IO ()
 main = do
-  (config, store, self) <- configure >>= either error return
+  (_config, store, _self) <- configure >>= either error return
   _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
   gossip <- newTMChanIO
 
