@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE TupleSections #-}
 
 module Core where
 
@@ -122,13 +123,16 @@ handleTCPMessage store sockAddr =
 
 handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
 handleUDPMessage store =
-  CC.map decode =$= handleDecodeErrors =$= CC.concat =$= CC.mapM_ process =$= CC.concat
+  CC.map  =$= handleDecodeErrors =$= CC.concat =$= CC.mapM_ (uncurry process) =$= CC.concat
   where
+    decodeUdp :: UDP.Message -> Either Error [(SockAddr, Message)]
+    decodeUdp udpMsg = map (UDP.msgSender udpMsg,) . unEnvelope <$> decode (UDP.msgData udpMsg)
+
     handleDecodeErrors :: Conduit (Either Error a) IO a
     handleDecodeErrors = awaitForever $ either fail yield
 
-    process :: Message -> IO [(Message, SockAddr)]
-    process = \ case
+    process :: SockAddr -> Message -> IO [(Message, SockAddr)]
+    process sender = \ case
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
         liftIO $ handleAck store seqNo'
@@ -137,7 +141,7 @@ handleUDPMessage store =
       -- respond with Ack if the ping was meant for us
       Ping seqNo' node'
         | node' == memberName (storeSelf store) ->
-          return [Gossip (Ack {seqNo = seqNo', payload = []}, UDP.msgSender req)]
+          return [Gossip (Ack {seqNo = seqNo', payload = []}, sender)]
         | otherwise ->
           return []
 
