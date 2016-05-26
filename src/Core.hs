@@ -5,7 +5,7 @@
 module Core where
 
 import           Control.Concurrent (threadDelay, forkIO)
-import           Control.Concurrent.Async (Concurrently(..), runConcurrently, race)
+import           Control.Concurrent.Async (Concurrently(..), runConcurrently, race_)
 import           Control.Concurrent.STM (STM(..), atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Exception.Base (bracket)
@@ -14,12 +14,12 @@ import           Control.Monad.Identity
 import qualified Data.ByteString as BS (ByteString, null, append, concat, drop, empty)
 import qualified Data.ByteString.Builder as BSB (word16BE, toLazyByteString)
 import           Data.ByteString.Lazy (fromStrict, toStrict)
-import           Data.Conduit (Conduit, ($$), (=$=), awaitForever, yield)
+import           Data.Conduit (Conduit, ConduitM, ($$), (=$=), awaitForever, yield)
 import           Data.Conduit.Cereal (conduitGet)
 import qualified Data.Conduit.Combinators as CC
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
 import           Data.Conduit.Network.UDP (sinkToSocket, sourceSocket)
-import qualified Data.Conduit.Network.UDP as UDP (Message (..))
+import qualified Data.Conduit.Network.UDP as UDP
 import           Data.Conduit.TMChan (TMChan(..), sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan, readTMChan)
 import           Data.Either (Either (..))
 import           Data.Either.Combinators (mapLeft)
@@ -28,7 +28,7 @@ import qualified Data.Map.Strict             as Map (elems, empty, filter,
                                                      lookup, insert)
 import           Data.Maybe (fromMaybe)
 import           Data.Monoid ((<>))
-import           Data.Serialize (decode)
+import           Data.Serialize (decode, encode)
 import           Data.Streaming.Network (getSocketUDP, getSocketTCP)
 import           Data.Time.Clock (UTCTime (..), getCurrentTime)
 import           Data.Word (Word16, Word32, Word8)
@@ -290,7 +290,7 @@ main = do
           runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
             appSource client $$ handleTCPMessage store (appSockAddr client) =$= appSink client
         disseminate' =
-          sourceTMChan gossip $$ disseminate s $= sinkToSocket sock
+          sourceTMChan gossip $$ disseminate s =$= sinkToSocket sock
         udpFlow =
-          UDP.sourceSocket udpSocket 65535 $$ handleUDPMessage store =$= sinkTMChan gossip False
+          UDP.sourceSocket sock 65535 $$ handleUDPMessage store =$= sinkTMChan gossip False
     in tcpServer `race_` udpReceiver `race_` disseminate'
