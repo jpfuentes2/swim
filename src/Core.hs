@@ -149,16 +149,14 @@ handleUDPMessage store =
 -- while ping/indirect-ping/ack are immediately sent
 disseminate :: Store -> Conduit Gossip IO UDP.Message
 disseminate _store = awaitForever $ \(Gossip msg addr) ->
-
-  -- FIXME: again, I need GADT or fix my message type so I can match using |
   -- send ping/indirect-ping/ack immediately and enqueue everything else
   case msg of
-    Ping{..} -> send msg addr
-    Ack{..} -> send msg addr
+    Ping{..} -> send' msg addr
+    Ack{..} -> send' msg addr
     IndirectPing{..} -> send msg addr
     _ -> enqueue msg addr
 
-  where send msg addr =
+  where send' msg addr =
           yield $ UDP.Message (encode msg) addr
 
         -- FIXME: need to add priority queue and then have send pull from that to create compound msg
@@ -262,15 +260,6 @@ failureDetector cfg s _gossip =
     loop = do
         _ <- after $ seconds 5
         _members <- kRandomNodesExcludingSelf cfg s
-
-        -- mapM_ (\node -> do
-          -- make a seqNo'
-          -- make a chan for seqNo'
-          -- let ackWaiter = race (after $ seconds 5) $ waitForAckOf chan
-        --                 chan <- 
-        --                 probeNode cfg s node  randomNodes
-
-        -- TODO: plug in probeNode
         loop
 
 main :: IO ()
