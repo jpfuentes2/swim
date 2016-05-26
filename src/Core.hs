@@ -285,7 +285,7 @@ main = do
   _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
   gossip <- newTMChanIO
 
-  withSocket (bindUDP "127.0.0.1" 4000) $ \sock -> do
+  withSocket (bindUDP "127.0.0.1" 4000) $ \sock ->
     let tcpServer =
           runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
             appSource client $$ handleTCPMessage store (appSockAddr client) =$= appSink client
