@@ -23,6 +23,8 @@ import           Data.Time.Clock ( UTCTime(..) )
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket.Internal (SockAddr)
 
+type SeqNo = Word32
+
 type Microseconds = Int
 
 type Error = String
@@ -35,10 +37,10 @@ type Host = String
 data Gossip = Gossip Message SockAddr
 
 data Config = Config { bindHost :: String
-                     , joinHost :: String
-                     , configJoinHosts :: NonEmpty String
-                     , configUDPBufferSize :: Int
-                     , cfgGossipNodes :: Int
+                     , joinHosts :: NonEmpty String
+                     , udpBufferSize :: Int
+                     , numToGossip :: Int
+                     , gossipInterval :: Microseconds
                      } deriving (Show, Eq)
 
 -- Member
@@ -52,17 +54,17 @@ data Member = Member { memberName        :: String
                      }
     deriving (Show, Eq)
 
+type MemberName = String
+
 instance Ord Member where
   compare a b = compare (memberName a) (memberName b)
 
-data EventHost = To String | From String deriving (Show, Eq)
-
 data Store = Store { storeSeqNo :: TVar Int
                    , storeIncarnation :: TVar Int
-                   -- , storeNumMembers :: TVar Int -- estimate, aka known unknown, of members
                    , storeMembers :: TVar (Map.Map String Member) -- known known of members
                    , storeSelf :: Member
                    , storeAckHandler :: AckHandler
+--                   , storeGossip :: AckHandler
                    -- , storeHandlers :: TVar( Map.Map Word32 )
                    }
 
@@ -96,7 +98,6 @@ instance Serialize Envelope where
         numMsgs <- fromIntegral <$> getWord8
         bytesLeft <- remaining
         unless (bytesLeft >= (numMsgs * 2)) $
-        -- unlessM ((>= (numMsgs * 2)) . remaining) $
           fail "compound message is truncated"
         NEL.nonEmpty . map fromIntegral <$> replicateM numMsgs getWord16be >>= \ case
           Just lengths -> Envelope <$> mapM (`isolate` get) lengths
@@ -129,10 +130,10 @@ data Message = Ping { seqNo :: Word32
                     , node        :: String
                     , deadFrom        :: String
                     }
-             | PushPull { incarnation :: Int
-                    , node        :: String
-                    , deadFrom        :: String
-                    }
+             -- | PushPull { incarnation :: Int
+             --        , node        :: String
+             --        , deadFrom        :: String
+             --        }
     deriving (Eq, Show)
 
 instance Serialize Message where
@@ -153,7 +154,7 @@ data MsgType = PingMsg
              | SuspectMsg
              | AliveMsg
              | DeadMsg
-             | PushPullMsg
+      --       | PushPullMsg
              | CompoundMsg
              deriving (Bounded, Eq, Show, Enum)
 
@@ -165,7 +166,7 @@ msgIndex m = case m of
   Suspect{..} -> fromIntegral $ fromEnum SuspectMsg
   Alive{..} -> fromIntegral $ fromEnum AliveMsg
   Dead{..} -> fromIntegral $ fromEnum DeadMsg
-  PushPull{..} -> fromIntegral $ fromEnum PushPullMsg
+  -- PushPull{..} -> fromIntegral $ fromEnum PushPullMsg
   -- Compound _ -> fromIntegral $ fromEnum CompoundMsg
 
 instance FromJSON Message where

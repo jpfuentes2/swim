@@ -22,6 +22,9 @@ import           Types
 seconds :: Int -> Microseconds
 seconds = (1000000 *)
 
+milliseconds :: Int -> Microseconds
+milliseconds = (1000 *)
+
 after :: Microseconds -> IO UTCTime
 after mics = do
   threadDelay mics
@@ -37,10 +40,10 @@ shuffle as = do
 
 parseConfig :: Either Error Config
 parseConfig = Right Config { bindHost = "udp://127.0.0.1:4002"
-                           , joinHost = "udp://127.0.0.1:4000"
-                           , configJoinHosts = NEL.fromList [ "udp://127.0.0.1:4000" ]
-                           , configUDPBufferSize = 65336
-                           , cfgGossipNodes = 10
+                           , joinHosts = NEL.fromList [ "udp://127.0.0.1:4000" ]
+                           , udpBufferSize = 65336
+                           , numToGossip = 10
+                           , gossipInterval = milliseconds 200
                            }
 
 withSocket :: IO Socket -> (Socket -> IO a) -> IO a

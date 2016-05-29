@@ -5,14 +5,16 @@
 
 module Core where
 
-import           Control.Concurrent.Async (race_)
+import           Control.Concurrent (forkIO)
+import           Control.Concurrent.Async (race_, race)
 import           Control.Concurrent.STM (STM, atomically)
 import           Control.Concurrent.STM.TVar
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity
 import qualified Data.ByteString as BS
-import           Data.Conduit (Conduit, ConduitM, ($$), (=$=), awaitForever, yield)
+import           Data.Conduit (Conduit, ConduitM, Producer, ($$), (=$=), awaitForever, yield)
 import           Data.Conduit.Cereal (conduitGet)
+import           Data.Conduit.List (sourceList)
 import qualified Data.Conduit.Combinators as CC
 import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
 import           Data.Conduit.Network.UDP (sinkToSocket)
@@ -68,11 +70,11 @@ removeDeadNodes s =
   modifyTVar (storeMembers s) $ Map.filter (not . isDead)
 
 -- gives kRandomNodes excluding our own host from the list
-kRandomNodesExcludingSelf :: Config -> Store -> IO [Member]
-kRandomNodesExcludingSelf cfg s = do
+kRandomNodesExcludingSelf :: Int -> Store -> IO [Member]
+kRandomNodesExcludingSelf numNodes s = do
   nodes <- atomically $ readTVar $ storeMembers s
   let self = storeSelf s
-  kRandomNodes (cfgGossipNodes cfg) [] (filter (/= self) $ Map.elems nodes)
+  kRandomNodes numNodes [] (filter (/= self) $ Map.elems nodes)
 
 -- select up to k random nodes, excluding a given
 -- node and any non-alive nodes. It is possible that less than k nodes are returned.
@@ -109,7 +111,7 @@ handleTCPMessage _store _sockAddr =
     process :: Message -> IO BS.ByteString
     process = \ case
       Ping _ _             -> fail "FIXME Ping"
-      PushPull _ _ _       -> fail "FIXME PushPull"
+      -- PushPull _ _ _       -> fail "FIXME PushPull"
       unexpected           -> fail $ "unexpected TCP message " <> show unexpected
 
 handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
@@ -132,7 +134,7 @@ handleUDPMessage store =
       -- respond with Ack if the ping was meant for us
       Ping seqNo' node'
         | node' == memberName (storeSelf store) ->
-          return [Gossip (Ack {seqNo = seqNo', payload = []}) sender]
+          return [Gossip Ack {seqNo = seqNo', payload = []} sender]
         | otherwise ->
           return []
 
@@ -140,8 +142,10 @@ handleUDPMessage store =
       -- and create ack handler which relays ack from target to original requester
       IndirectPing _seqNo' target' port' node' -> do
         next <- liftIO $ nextIncarnation store
-        return [ Gossip (Ping { seqNo = fromIntegral next, node = node' })
-                        (SockAddrInet (fromIntegral port') target') ]
+        return [ Gossip Ping { seqNo = fromIntegral next, node = node' } $
+                        SockAddrInet (fromIntegral port') target' ]
+
+      _ -> return []
 
 -- disseminate receives messages for gossiping to other members
 -- ping/indirect-ping
@@ -151,12 +155,12 @@ disseminate :: Store -> Conduit Gossip IO UDP.Message
 disseminate _store = awaitForever $ \(Gossip msg addr) ->
   -- send ping/indirect-ping/ack immediately and enqueue everything else
   case msg of
-    Ping{..} -> send' msg addr
-    Ack{..} -> send' msg addr
-    IndirectPing{..} -> send msg addr
+    Ping{..} -> gossip msg addr
+    Ack{..} -> gossip msg addr
+    IndirectPing{..} -> gossip msg addr
     _ -> enqueue msg addr
 
-  where send' msg addr =
+  where gossip msg addr =
           yield $ UDP.Message (encode msg) addr
 
         -- FIXME: need to add priority queue and then have send pull from that to create compound msg
@@ -165,12 +169,12 @@ disseminate _store = awaitForever $ \(Gossip msg addr) ->
 
 -- TODO: need a timer to mark this node as dead after suspect timeout
 -- TODO: solve the expression problem of our Message type: we want Suspect msg here
-suspectOrDeadNode' :: Store -> Message -> String -> Int -> Liveness -> IO (Maybe Message)
+suspectOrDeadNode' :: Store -> Message -> MemberName -> Int -> Liveness -> IO (Maybe Message)
 suspectOrDeadNode' _ _ _ _ IsAlive = undefined
 suspectOrDeadNode' s msg name i suspectOrDead = do
-  (self, members) <- atomically $ membersAndSelf s
+  (self, membs) <- atomically $ membersAndSelf s
 
-  case find ((== name) . memberName) members of
+  case find ((== name) . memberName) membs of
     -- we don't know this node. ignore.
     Nothing -> return Nothing
 
@@ -185,16 +189,17 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
                  saveMember m' >> return nextInc
 
                -- return so we don't mark ourselves suspect/dead
+               -- FIXME: hardcoding!
                return $ Just $ Alive i' name (1 :: Word32) (1 :: Word16) []
 
     -- broadcast suspect/dead msg
     Just m -> do
-      now <- getCurrentTime
-      _ <- atomically $ do
-        let m' = m { memberIncarnation = i
+      getCurrentTime >>= \now ->
+        atomically $ do
+          let m' = m { memberIncarnation = i
                    , memberAlive = suspectOrDead
                    , memberLastChange = now }
-        saveMember m'
+          saveMember m'
 
       return $ Just msg
 
@@ -217,54 +222,63 @@ deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
 deadNode _ _ = undefined
 
 type Timeout = ()
-type SeqNo = Word32
 type AckWaiter = IO (Either Timeout SeqNo)
 
--- TODO: time to put self member into Store rather than Config
-probeNode :: Config ->
-             Store ->
-             Member ->
-             SeqNo ->
-             AckWaiter ->
-             ConduitM AckResponse Message IO ()
-probeNode cfg s m seqNo' ackWaiter = do
-  yield Ping { seqNo = fromIntegral seqNo', node = show m }
-  ack <- liftIO ackWaiter
+invokeAckHandler :: Store -> SeqNo -> IO ()
+invokeAckHandler = undefined
 
-  case ack of
-    Right _ -> return ()
+pollAckHandlerFor :: Store -> SeqNo -> STM
+pollAckHandlerFor store seqNo =
+  readTMChan $ storeAckHandler store >>
+  seqNo ack == seqNo
 
-    -- send IndirectPing to kRandomNodes
-    Left _ -> do
-      let SockAddrInet port host = memberHostNew m
-          indirectPing _mem = IndirectPing { seqNo = fromIntegral seqNo'
-                                           , target = host
-                                           , port = fromIntegral port
-                                           , node = "wat" }
-      randomNodes <- liftIO $ kRandomNodesExcludingSelf cfg s
-      mapM_ (yield . indirectPing) randomNodes
-      ack <- liftIO ackWaiter
+failureDetector :: Config -> Store -> Conduit () IO Gossip
+failureDetector cfg@Config{..} store = loop
+  where loop = do
+          _ <- after $ seconds gossipInterval
+          _members <- kRandomNodesExcludingSelf numToGossip store
+          newSeqNo <- nextSeqNo store
 
-      case ack of
-        Right _ -> return ()
+          -- let ackWaiter = race (after gossipInterval) (atomically $ )
+
+          -- sourceList _members $$ probeNode newSeqNo ackWaiter $=
+          return loop
+
+        probeNode :: SeqNo -> AckWaiter -> Member -> Conduit () IO Gossip
+        probeNode newSeqNo ackWaiter m = do
+          yield $ Ping (fromIntegral _seqNo) $ show m
+          ack <- ackWaiter
+
+          -- send IndirectPing to k random nodes if we didn't receive ack
+          either (invokeAckHandler store >> return) $ do
+            randomMembers <- liftIO $ kRandomNodesExcludingSelf numToGossip store
+            mapM_ sendIndirectPing randomMembers
+
+        sendIndirectPing :: SeqNo -> AckWaiter -> Member -> Conduit () IO Gossip
+        sendIndirectPing newSeqNo ackWaiter m@Member{..} = do
+          yield IndirectPing { seqNo = newSeqNo
+                             , target = fst memberHost
+                             , port = snd memberHost
+                             , node = show m
+                             }
+          ack <- ackWaiter
+          either (invokeAckHandler store >> return) suspectNode'
 
         -- broadcast possible suspect msg
-        Left _ -> do
-          suspect <- liftIO $ suspectNode s $ Suspect (memberIncarnation m) (memberName m)
-          maybe (return ()) yield suspect
+        suspectNode' :: Member -> Conduit () IO Gossip
+        suspectNode' Member{..} = do
+          suspect <- liftIO $ suspectNode store $ Suspect memberIncarnation memberName
+          maybe $ return () $ yield Gossip suspect memberHostNew
 
-failureDetector :: Config -> Store -> TMChan Gossip -> IO ()
-failureDetector cfg s _gossip =
-    loop
-  where
-    loop = do
-        _ <- after $ seconds 5
-        _members <- kRandomNodesExcludingSelf cfg s
-        loop
+-- type Producer (m :: * -> *) o = forall i. ConduitM i o m ()
+-- handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
+failureDetector' :: Config -> Store -> Conduit () IO Gossip
+failureDetector' cfg store = undefined
+--  failureDetector cfg store =$= sinkTMChan gossip False
 
 main :: IO ()
 main = do
-  (_config, store, _self) <- configure >>= either error return
+  (cfg, store, _) <- configure >>= either error return
   _ <- installHandler sigUSR1 (Catch $ dumpStore store) Nothing
   gossip <- newTMChanIO
 
@@ -272,8 +286,8 @@ main = do
     let tcpServer =
           runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
             appSource client $$ handleTCPMessage store (appSockAddr client) =$= appSink client
-        disseminate' =
-          sourceTMChan gossip $$ disseminate store =$= sinkToSocket sock
         udpReceiver =
           UDP.sourceSocket sock 65535 $$ handleUDPMessage store =$= sinkTMChan gossip False
-    in tcpServer `race_` udpReceiver `race_` disseminate'
+        disseminate' =
+          sourceTMChan gossip $$ disseminate store =$= sinkToSocket sock
+    in tcpServer `race_` udpReceiver `race_` disseminate' `race_` failureDetector'
