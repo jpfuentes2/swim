@@ -1,33 +1,38 @@
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE LambdaCase        #-}
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE Rank2Types        #-}
+{-# LANGUAGE RecordWildCards   #-}
+{-# LANGUAGE TupleSections     #-}
 
 module Core where
 
-import           Control.Concurrent (forkIO)
-import           Control.Concurrent.Async (race_, race)
-import           Control.Concurrent.STM (STM, atomically)
+import           Control.Concurrent          (forkIO)
+import           Control.Concurrent.Async    (race, race_)
+import           Control.Concurrent.STM      (STM, atomically)
 import           Control.Concurrent.STM.TVar
-import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity
-import qualified Data.ByteString as BS
-import           Data.Conduit (Conduit, ConduitM, Producer, ($$), (=$=), awaitForever, yield)
-import           Data.Conduit.Cereal (conduitGet)
-import           Data.Conduit.List (sourceList)
-import qualified Data.Conduit.Combinators as CC
-import           Data.Conduit.Network (runTCPServer, appSource, appSink, serverSettings, appSockAddr)
-import           Data.Conduit.Network.UDP (sinkToSocket)
-import qualified Data.Conduit.Network.UDP as UDP
-import           Data.Conduit.TMChan (TMChan, sourceTMChan, writeTMChan, newTMChanIO, sinkTMChan)
-import           Data.Foldable (find)
-import qualified Data.List.NonEmpty as NEL
-import qualified Data.Map.Strict as Map
-import           Data.Monoid ((<>))
-import           Data.Serialize (decode, encode, get)
-import           Data.Time.Clock (getCurrentTime)
-import           Data.Word (Word16, Word32)
-import           Network.Socket as NS
+import           Control.Monad.IO.Class      (MonadIO (liftIO))
+import           Control.Monad.Trans.Class   (lift)
+import           Control.Monad.Trans.Either  (EitherT (..), right, runEitherT, swapEitherT)
+import qualified Data.ByteString             as BS
+import           Data.Conduit                (Conduit, Source, awaitForever,
+                                              yield, ($$), (=$=))
+import           Data.Conduit.Cereal         (conduitGet)
+import qualified Data.Conduit.Combinators    as CC
+import           Data.Conduit.Network        (appSink, appSockAddr, appSource,
+                                              runTCPServer, serverSettings)
+import           Data.Conduit.Network.UDP    (sinkToSocket)
+import qualified Data.Conduit.Network.UDP    as UDP
+import           Data.Conduit.TMChan         (TMChan, newTMChanIO, sinkTMChan,
+                                              sourceTMChan, writeTMChan)
+import           Data.Foldable               (find)
+import qualified Data.List.NonEmpty          as NEL
+import qualified Data.Map.Strict             as Map
+import           Data.Monoid                 ((<>))
+import           Data.Serialize              (decode, encode, get)
+import           Data.Time.Clock             (UTCTime (..), getCurrentTime)
+import           Data.Word                   (Word16, Word32)
+import           Network.Socket              as NS
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
 import           Types
@@ -83,14 +88,6 @@ kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
 
--- gossip/schedule
-waitForAckOf :: AckChan -> IO ()
-waitForAckOf (AckChan chan seqNo') =
-  sourceTMChan chan $$ ackOf (fromIntegral seqNo') =$= CC.sinkNull >> return ()
-  where
-    ackOf s = awaitForever $ \ackSeqNo ->
-      unless (s == ackSeqNo) $ ackOf s
-
 members :: Store -> STM [Member]
 members s = Map.elems <$> readTVar (storeMembers s)
 
@@ -98,9 +95,6 @@ membersAndSelf :: Store -> STM (Member, [Member])
 membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
   where
     self = storeSelf s
-
-handleAck :: Store -> Word32 -> IO ()
-handleAck store seqNo' = atomically $ writeTMChan (storeAckHandler store) seqNo'
 
 -- we're not using TCP for anything other than initial state sync
 -- so we only handle pushPull / ping
@@ -128,7 +122,7 @@ handleUDPMessage store =
     process sender = \ case
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
-        liftIO $ handleAck store seqNo'
+        _ <- liftIO $ getCurrentTime >>= (\t -> atomically $ invokeAckHandler store (seqNo',t))
         return []
 
       -- respond with Ack if the ping was meant for us
@@ -167,10 +161,9 @@ disseminate _store = awaitForever $ \(Gossip msg addr) ->
         enqueue _msg _addr =
           return ()
 
--- TODO: need a timer to mark this node as dead after suspect timeout
--- TODO: solve the expression problem of our Message type: we want Suspect msg here
+-- FIXME: need a timer to mark this node as dead after suspect timeout
 suspectOrDeadNode' :: Store -> Message -> MemberName -> Int -> Liveness -> IO (Maybe Message)
-suspectOrDeadNode' _ _ _ _ IsAlive = undefined
+suspectOrDeadNode' _ _ _ _ IsAlive = error "received IsAlive for suspectOrDeadNode'"
 suspectOrDeadNode' s msg name i suspectOrDead = do
   (self, membs) <- atomically $ membersAndSelf s
 
@@ -204,10 +197,10 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
       return $ Just msg
 
   where
-    livenessCheck m = case suspectOrDead of
-      IsAlive -> undefined
-      IsSuspect -> memberAlive m /= IsAlive
-      IsDead -> memberAlive m == IsDead
+    livenessCheck Member{..} = case suspectOrDead of
+      IsAlive -> error "received IsAlive for suspectOrDeadNode'"
+      IsSuspect -> memberAlive /= IsAlive
+      IsDead -> memberAlive == IsDead
 
     -- name = case msg of
     saveMember m =
@@ -221,60 +214,65 @@ deadNode :: Store -> Message -> IO (Maybe Message)
 deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
 deadNode _ _ = undefined
 
-type Timeout = ()
-type AckWaiter = IO (Either Timeout SeqNo)
+invokeAckHandler :: Store -> (SeqNo, UTCTime) -> STM ()
+invokeAckHandler Store{..} = writeTMChan storeAckHandler
 
-invokeAckHandler :: Store -> SeqNo -> IO ()
-invokeAckHandler = undefined
+waitForAckOf :: Store -> SeqNo -> IO ()
+waitForAckOf Store{..} _seqNo =
+  sourceTMChan storeAckHandler $$ ackOf _seqNo =$= CC.sinkNull >> return ()
+  where
+    ackOf s = awaitForever $ \(ackSeqNo, _) ->
+      unless (s == ackSeqNo) $ ackOf s
 
-pollAckHandlerFor :: Store -> SeqNo -> STM
-pollAckHandlerFor store seqNo =
-  readTMChan $ storeAckHandler store >>
-  seqNo ack == seqNo
+failureDetector :: Config -> Store -> Source IO Gossip
+failureDetector Config{..} store@Store{..} = do
+  wantToGossip <- liftIO newTMChanIO
+  _ <- liftIO $ loop wantToGossip
+  sourceTMChan wantToGossip
 
-failureDetector :: Config -> Store -> Conduit () IO Gossip
-failureDetector cfg@Config{..} store = loop
-  where loop = do
+  where loop gossip = void $ forkIO $ do
+
           _ <- after $ seconds gossipInterval
-          _members <- kRandomNodesExcludingSelf numToGossip store
-          newSeqNo <- nextSeqNo store
+          currSeqNo <- fromIntegral <$> nextSeqNo store
+          -- FIXME: move from random to robust scheme
+          member <- fmap head (kRandomNodesExcludingSelf 1 store)
 
-          -- let ackWaiter = race (after gossipInterval) (atomically $ )
+          _ <- runEitherT $ swapEitherT $ do
+            -- we short-circuit here (stop) if we receive an Ack otherwise we do each line
+            _ <- probeNode currSeqNo member gossip
+            _ <- sendIndirectPing currSeqNo member gossip
+            lift $ suspectNode' member gossip
+            -- FIXME: suspect timeout
 
-          -- sourceList _members $$ probeNode newSeqNo ackWaiter $=
-          return loop
+          loop gossip
 
-        probeNode :: SeqNo -> AckWaiter -> Member -> Conduit () IO Gossip
-        probeNode newSeqNo ackWaiter m = do
-          yield $ Ping (fromIntegral _seqNo) $ show m
-          ack <- ackWaiter
+        emit :: TMChan Gossip -> Member -> Message -> IO ()
+        emit gossip Member{..} msg =
+          atomically $ writeTMChan gossip $ Gossip msg memberHostNew
 
-          -- send IndirectPing to k random nodes if we didn't receive ack
-          either (invokeAckHandler store >> return) $ do
-            randomMembers <- liftIO $ kRandomNodesExcludingSelf numToGossip store
-            mapM_ sendIndirectPing randomMembers
+        probeNode :: SeqNo -> Member -> TMChan Gossip -> EitherT Timeout IO ()
+        probeNode currSeqNo m@Member{..} gossip = do
+          _ <- right $ emit gossip m $ Ping currSeqNo memberName
+          EitherT $ race (timeout $ milliseconds gossipInterval)
+                         (waitForAckOf store currSeqNo)
 
-        sendIndirectPing :: SeqNo -> AckWaiter -> Member -> Conduit () IO Gossip
-        sendIndirectPing newSeqNo ackWaiter m@Member{..} = do
-          yield IndirectPing { seqNo = newSeqNo
-                             , target = fst memberHost
-                             , port = snd memberHost
-                             , node = show m
-                             }
-          ack <- ackWaiter
-          either (invokeAckHandler store >> return) suspectNode'
+        sendIndirectPing :: SeqNo -> Member -> TMChan Gossip -> EitherT Timeout IO ()
+        sendIndirectPing currSeqNo m@Member{..} gossip = do
+          let SockAddrInet port host = memberHostNew
+              indirectPing = IndirectPing { seqNo = currSeqNo
+                                          , target = host
+                                          , port = fromIntegral port
+                                          , node = show m
+                                          }
+          membs <- lift $ kRandomNodesExcludingSelf numToGossip store
+          _ <- lift $ mapM_ (\_m -> emit gossip _m indirectPing) membs
+          EitherT $ race (timeout $ milliseconds gossipInterval)
+                         (waitForAckOf store currSeqNo)
 
-        -- broadcast possible suspect msg
-        suspectNode' :: Member -> Conduit () IO Gossip
-        suspectNode' Member{..} = do
-          suspect <- liftIO $ suspectNode store $ Suspect memberIncarnation memberName
-          maybe $ return () $ yield Gossip suspect memberHostNew
-
--- type Producer (m :: * -> *) o = forall i. ConduitM i o m ()
--- handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
-failureDetector' :: Config -> Store -> Conduit () IO Gossip
-failureDetector' cfg store = undefined
---  failureDetector cfg store =$= sinkTMChan gossip False
+        suspectNode' :: Member -> TMChan Gossip -> IO ()
+        suspectNode' m@Member{..} gossip = do
+          suspect <- suspectNode store $ Suspect memberIncarnation memberName
+          maybe (pure ()) (emit gossip m) suspect
 
 main :: IO ()
 main = do
@@ -286,8 +284,13 @@ main = do
     let tcpServer =
           runTCPServer (serverSettings 4000 "127.0.0.1") $ \client ->
             appSource client $$ handleTCPMessage store (appSockAddr client) =$= appSink client
+
         udpReceiver =
           UDP.sourceSocket sock 65535 $$ handleUDPMessage store =$= sinkTMChan gossip False
+
+        failureDetector' =
+          failureDetector cfg store $$ sinkTMChan gossip False
+
         disseminate' =
           sourceTMChan gossip $$ disseminate store =$= sinkToSocket sock
     in tcpServer `race_` udpReceiver `race_` disseminate' `race_` failureDetector'

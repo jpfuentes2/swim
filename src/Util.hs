@@ -1,3 +1,4 @@
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 module Util where
@@ -29,6 +30,11 @@ after :: Microseconds -> IO UTCTime
 after mics = do
   threadDelay mics
   getCurrentTime
+
+timeout :: Microseconds -> IO Timeout
+timeout mics = do
+  start <- getCurrentTime
+  (start,) <$> after mics
 
 -- FIXME: O(N^2) Fisher-Yates shuffle. it's okay b/c our lists are small for now
 shuffle :: [a] -> IO [a]

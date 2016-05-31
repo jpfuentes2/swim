@@ -31,6 +31,8 @@ type Error = String
 
 type Second = Int
 
+type Timeout = (UTCTime, UTCTime)
+
 -- replace with SockAddr
 type Host = String
 
@@ -42,6 +44,15 @@ data Config = Config { bindHost :: String
                      , numToGossip :: Int
                      , gossipInterval :: Microseconds
                      } deriving (Show, Eq)
+
+data Store = Store { storeSeqNo :: TVar Int
+                   , storeIncarnation :: TVar Int
+                   , storeMembers :: TVar (Map.Map String Member) -- known known of members
+                   , storeSelf :: Member
+                   , storeAckHandler :: AckHandler
+--                   , storeGossip :: AckHandler
+                   -- , storeHandlers :: TVar( Map.Map Word32 )
+                   }
 
 -- Member
 data Member = Member { memberName        :: String
@@ -59,18 +70,9 @@ type MemberName = String
 instance Ord Member where
   compare a b = compare (memberName a) (memberName b)
 
-data Store = Store { storeSeqNo :: TVar Int
-                   , storeIncarnation :: TVar Int
-                   , storeMembers :: TVar (Map.Map String Member) -- known known of members
-                   , storeSelf :: Member
-                   , storeAckHandler :: AckHandler
---                   , storeGossip :: AckHandler
-                   -- , storeHandlers :: TVar( Map.Map Word32 )
-                   }
-
 -- The state of a Member
 data Liveness = IsAlive | IsSuspect | IsDead
-    deriving (Eq, Show, Read)
+    deriving (Eq, Show, Read, Enum, Bounded)
 
 -- |Wrapper of a series of 'Message's which are transmitted together.
 -- If a single message, then encoded alone, otherwise encoded as a compound message
@@ -142,11 +144,7 @@ instance Serialize Message where
     lbs <- getLazyByteString =<< fromIntegral <$> remaining
     maybe (fail $ "Could not parse " <> show lbs) return . unpackAeson $ lbs
 
-newtype AckResponse = AckResponse Word32
-
-data AckChan = AckChan (TMChan Word32) Word32
-
-type AckHandler = TMChan Word32
+type AckHandler = TMChan (SeqNo, UTCTime)
 
 data MsgType = PingMsg
              | IndirectPingMsg
