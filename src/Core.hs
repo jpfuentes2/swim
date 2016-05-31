@@ -238,9 +238,9 @@ failureDetector Config{..} store@Store{..} = do
           member <- fmap head (kRandomNodesExcludingSelf 1 store)
 
           _ <- runEitherT $ swapEitherT $ do
-            -- we short-circuit here (stop) if we receive an Ack otherwise we do each line
-            _ <- probeNode currSeqNo member gossip
-            _ <- sendIndirectPing currSeqNo member gossip
+            -- we short-circuit here (stop) if we receive an Ack
+            _ <- ping currSeqNo member gossip
+            _ <- indirectPing currSeqNo member gossip
             lift $ suspectNode' member gossip
             -- FIXME: suspect timeout
 
@@ -250,22 +250,22 @@ failureDetector Config{..} store@Store{..} = do
         emit gossip Member{..} msg =
           atomically $ writeTMChan gossip $ Gossip msg memberHostNew
 
-        probeNode :: SeqNo -> Member -> TMChan Gossip -> EitherT Timeout IO ()
-        probeNode currSeqNo m@Member{..} gossip = do
+        ping :: SeqNo -> Member -> TMChan Gossip -> EitherT Timeout IO ()
+        ping currSeqNo m@Member{..} gossip = do
           _ <- right $ emit gossip m $ Ping currSeqNo memberName
           EitherT $ race (timeout $ milliseconds gossipInterval)
                          (waitForAckOf store currSeqNo)
 
-        sendIndirectPing :: SeqNo -> Member -> TMChan Gossip -> EitherT Timeout IO ()
-        sendIndirectPing currSeqNo m@Member{..} gossip = do
+        indirectPing :: SeqNo -> Member -> TMChan Gossip -> EitherT Timeout IO ()
+        indirectPing currSeqNo m@Member{..} gossip = do
           let SockAddrInet port host = memberHostNew
-              indirectPing = IndirectPing { seqNo = currSeqNo
-                                          , target = host
-                                          , port = fromIntegral port
-                                          , node = show m
-                                          }
+              msg = IndirectPing { seqNo = currSeqNo
+                                 , target = host
+                                 , port = fromIntegral port
+                                 , node = show m
+                                 }
           membs <- lift $ kRandomNodesExcludingSelf numToGossip store
-          _ <- lift $ mapM_ (\_m -> emit gossip _m indirectPing) membs
+          _ <- lift $ mapM_ (\_m -> emit gossip _m msg) membs
           EitherT $ race (timeout $ milliseconds gossipInterval)
                          (waitForAckOf store currSeqNo)
 
