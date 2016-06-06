@@ -59,16 +59,20 @@ test-suite swim-test
   main-is:             Spec.hs
   build-depends:       base
                      , bytestring
+                     , cereal
                      , conduit
                      , conduit-combinators
                      , conduit-extra
                      , containers
                      , hspec
                      , hspec-expectations
+                     , mtl
                      , network
+                     , semigroups
                      , stm
                      , swim
                      , time == 1.5.0.1
+                     , transformers
   ghc-options:         -Wall -threaded -rtsopts -with-rtsopts=-N
   default-language:    Haskell2010
 

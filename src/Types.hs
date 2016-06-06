@@ -36,7 +36,7 @@ type Timeout = (UTCTime, UTCTime)
 -- replace with SockAddr
 type Host = String
 
-data Gossip = Gossip Message SockAddr
+data Gossip = Direct Message SockAddr | Broadcast Message deriving (Show, Eq)
 
 data Config = Config { bindHost :: String
                      , joinHosts :: NonEmpty String
@@ -48,8 +48,10 @@ data Config = Config { bindHost :: String
 data Store = Store { storeSeqNo :: TVar Int
                    , storeIncarnation :: TVar Int
                    , storeMembers :: TVar (Map.Map String Member) -- known known of members
-                   , storeSelf :: Member
                    , storeAckHandler :: AckHandler
+                   , storeSelf :: Member
+                   , storeCfg :: Config
+                   , storeGossip :: TMChan Gossip
 --                   , storeGossip :: AckHandler
                    -- , storeHandlers :: TVar( Map.Map Word32 )
                    }
@@ -76,7 +78,7 @@ data Liveness = IsAlive | IsSuspect | IsDead
 
 -- |Wrapper of a series of 'Message's which are transmitted together.
 -- If a single message, then encoded alone, otherwise encoded as a compound message
-newtype Envelope = Envelope { unEnvelope :: NonEmpty Message }
+newtype Envelope = Envelope { unEnvelope :: NonEmpty Message } deriving (Eq, Show)
 
 -- FIXME? this protocol is totally weird - includes a message type which is ignored if it's
 -- not the compound message type
@@ -93,7 +95,7 @@ instance Serialize Envelope where
   get = do
     typ <- fromIntegral <$> getWord8
     -- FIXME? could use safe's toEnumMay or similar from errors
-    unless (typ >= 0 && typ < fromEnum (maxBound :: MsgType)) $
+    unless (typ >= 0 && typ <= fromEnum (maxBound :: MsgType)) $
       fail $ "invalid message type " <> show typ
     case toEnum typ of
       CompoundMsg -> do

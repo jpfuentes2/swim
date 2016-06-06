@@ -20,9 +20,6 @@ import           Network.Socket (Socket, SockAddr(SockAddrInet), close, setSocke
 import           System.Random (getStdRandom, randomR)
 import           Types
 
-seconds :: Int -> Microseconds
-seconds = (1000000 *)
-
 milliseconds :: Int -> Microseconds
 milliseconds = (1000 *)
 
@@ -76,20 +73,20 @@ dumpStore s = do
   print $ "members: " <> show ms
   print $ "self: " <> show self
 
-makeStore :: Member -> IO Store
-makeStore self = do
+makeStore :: Member -> Config -> IO Store
+makeStore self cfg = do
   mems <- newTVarIO Map.empty
-  -- num <- newTVarIO 0
-  -- events <- newTVarIO []
-  sqNo <- newTVarIO 0
+  seqNo' <- newTVarIO 0
   inc <- newTVarIO 0
   ackHandler <- newTMChanIO
-  let store = Store { storeSeqNo = sqNo
+  gossip <- newTMChanIO
+  let store = Store { storeSeqNo = seqNo'
                     , storeIncarnation = inc
                     , storeMembers = mems
                     , storeSelf = self
                     , storeAckHandler = ackHandler
-                    -- , storeNumMembers = num
+                    , storeCfg = cfg
+                    , storeGossip = gossip
                     }
   return store
 
@@ -103,9 +100,8 @@ makeSelf _ =
          , memberLastChange = UTCTime (ModifiedJulianDay 0) 0
          }
 
-configure :: IO (Either Error (Config, Store, Member))
+configure :: IO (Either Error Store)
 configure = runEitherT $ do
   cfg <- hoistEither parseConfig
   self <- right (makeSelf cfg)
-  store <- liftIO $ makeStore self
-  return (cfg, store, self)
+  liftIO $ makeStore self cfg
