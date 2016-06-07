@@ -95,8 +95,8 @@ instance Serialize Envelope where
   get = do
     typ <- fromIntegral <$> getWord8
     -- FIXME? could use safe's toEnumMay or similar from errors
-    unless (typ >= 0 && typ <= fromEnum (maxBound :: MsgType)) $
-      fail $ "invalid message type " <> show typ
+    -- unless (typ >= 0 && typ <= fromEnum (maxBound :: MsgType)) $
+    --   fail $ "invalid message type blah" <> show typ
     case toEnum typ of
       CompoundMsg -> do
         numMsgs <- fromIntegral <$> getWord8

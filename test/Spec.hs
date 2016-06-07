@@ -3,27 +3,24 @@
 {-# LANGUAGE LambdaCase #-}
 
 import           Control.Concurrent.STM ( atomically )
-import           Control.Concurrent.STM.TVar ( newTVarIO, writeTVar, modifyTVar, swapTVar, readTVar )
 import           Data.Bits (shiftL, (.|.))
-import qualified Data.ByteString as BS (ByteString(..), drop, pack, unpack, singleton, append)
-import qualified Data.ByteString.Char8 as C8 (pack)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as C8
+import           Control.Concurrent.STM.TVar (swapTVar, readTVar)
 import           Data.Conduit
 import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Combinators    as CC
-import Data.List (sort)
-import qualified Data.Conduit.Network.UDP    as UDP ( Message(..), msgSender
-                                                    , sourceSocket, sinkToSocket )
+import qualified Data.Conduit.Network.UDP    as UDP
 import           Data.Monoid ( (<>) )
 import           Data.Foldable ( foldl' )
-import           Data.List (find)
+import           Data.List (find, sort)
 import           Control.Monad.Identity
 import           Control.Monad.IO.Class      (MonadIO (liftIO))
 import qualified Data.Map.Strict as Map
 import           Data.Time.Calendar ( Day(ModifiedJulianDay) )
 import           Data.Time.Clock ( UTCTime(..), getCurrentTime )
 import           Data.Word ( Word16, Word32, Word8 )
-import           Network.Socket.Internal ( SockAddr(SockAddrInet) )
-import           Network.Socket.Internal ( PortNumber)
+import           Network.Socket.Internal ( SockAddr(SockAddrInet), PortNumber )
 import           Data.Serialize (decode, encode, get)
 import qualified Data.List.NonEmpty          as NEL
 import           Test.Hspec
@@ -67,10 +64,18 @@ membersMap :: [Member] -> Map.Map String Member
 membersMap ms =
   Map.fromList $ map (\m -> (memberName m, m)) ms
 
+currentIncarnation :: Store -> IO Int
+currentIncarnation Store{..} = atomically $ readTVar storeIncarnation
 -- sockAddr = SockAddrInet 4002 $ fromOctets $ BS.unpack $ C8.pack "127.0.0.1"
+
+envelope :: [Message] -> Envelope
+envelope msgs = Envelope $ NEL.fromList msgs
+
+backAndForthForeverAndEver msgs = decode (encode $ envelope msgs)
 
 main :: IO ()
 main = hspec $ do
+  let addr = sockAddr 4000
 --   describe "handleMessage" $ do
 --     context "when received Ping" $
 --       it "produces an Ack" $ withStore $ \s -> do
@@ -96,18 +101,19 @@ main = hspec $ do
   describe "wire protocol" $ do
     it "encodes & decodes" $ do
       let ping = Ping { seqNo = 1, node = "a" }
-      decode (encode ping) `shouldBe` Right ping
+          indirectPing = IndirectPing { seqNo = 1, target = 1, port = 4000, node = "a" }
+
+      backAndForthForeverAndEver [ping] `shouldBe` Right (envelope [ping])
+      backAndForthForeverAndEver [indirectPing] `shouldBe` Right (envelope [indirectPing])
 
     it "encodes & decodes envelope/compound" $ do
       let ping1 = Ping { seqNo = 1, node = "a" }
           ack1 = Ack { seqNo = 2, payload = [] }
           ping2 = Ping { seqNo = 3, node = "b" }
           ack2 = Ack { seqNo = 4, payload = [] }
-
           msgs = [ping1, ack1, ping2, ack2]
-          encoded = encode $ Envelope (NEL.fromList msgs)
 
-      decode encoded `shouldBe` Right (Envelope $ NEL.fromList msgs)
+      backAndForthForeverAndEver msgs `shouldBe` Right (envelope msgs)
 
   describe "Core.removeDeadNodes" $
     it "removes dead members" $ withStore $ \s@Store{..} -> do
@@ -122,6 +128,7 @@ main = hspec $ do
   describe "Core.membersAndSelf" $
     it "gives self fst and everyone else snd" $ withStore $ \s@Store{..} -> do
       let mems = makeMembers
+
       _ <- atomically $ swapTVar storeMembers $ membersMap (mems <> [storeSelf])
       (self', mems') <- atomically $ Core.membersAndSelf s
 
@@ -177,25 +184,35 @@ main = hspec $ do
   describe "Core.handleUDPMessage" $ do
     let ping = Ping 1 "myself"
         ack = Ack 1 []
-        indirectPing (target, port) = IndirectPing 1 target port "other"
+        indirectPing (SockAddrInet target port) = IndirectPing 1 (fromIntegral target) (fromIntegral port) "other"
         send s msg = do
-          let udpMsg = UDP.Message (encode (Envelope $ NEL.fromList [msg])) (sockAddr 4000)
+          let udpMsg = UDP.Message (encode (Envelope $ NEL.fromList [msg])) addr
           CL.sourceList [udpMsg] $$ Core.handleUDPMessage s =$= CC.sinkList
         invokesAckHandler = undefined
 
-    it "gets Ping, responds with Ack" $ withStore $ \s@Store{..} -> do
+    it "gets Ping for us, responds with Ack" $ withStore $ \s@Store{..} -> do
       gossip <- send s ping
 
-      head gossip `shouldBe` Direct (Ack 1 []) (sockAddr 4000)
+      gossip `shouldBe` [Direct (Ack 1 []) addr]
 
-    it "gets Ack, drops msg and invokes ackHandler" $ withStore $ \s@Store{..} -> do
+    it "gets Ping for someone else, ignores msg" $ withStore $ \s@Store{..} -> do
+      gossip <- send s $ Ping 1 "unknown-node"
+
+      gossip `shouldBe` []
+
+    it "gets Ack, invokes ackHandler" $ withStore $ \s@Store{..} -> do
       gossip <- send s ack
 
       gossip `shouldBe` []
       -- invokesAckHandler $ seqNo ack
 
-    -- it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
-    --   gossip <- send s (indirectPing  4000)
+    it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
+      let indirectPing' = indirectPing addr
+          udpMsg = UDP.Message (encode (Envelope $ NEL.fromList [indirectPing'])) addr
+      beforeInc <- currentIncarnation s
+      gossip <- send s indirectPing'
+      afterInc <- currentIncarnation s
 
-    --   gossip `shouldBe` []
-    --   -- invokesAckHandler $ seqNo ack
+      beforeInc + 1 `shouldBe` afterInc
+      gossip `shouldBe` [Direct (Ping 1 (node indirectPing')) addr]
+      -- invokesAckHandler $ seqNo ack
