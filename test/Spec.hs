@@ -110,46 +110,35 @@ main = localhost >>= \hostAddr ->
         Map.notMember "dead" mems' `shouldBe` True
         Map.size mems' `shouldBe` 2
 
-    describe "Core.membersAndSelf" $
-      it "gives self fst and everyone else snd" $ withStore $ \s@Store{..} -> do
-        let mems = defaultMembers
-
-        _ <- atomically $ swapTVar storeMembers $ membersMap (mems <> [storeSelf])
-        (self', mems') <- atomically $ Core.membersAndSelf s
-
-        storeSelf `shouldBe` self'
-        find (== storeSelf) mems' `shouldBe` Nothing
-        sort mems `shouldBe` sort mems'
-
-    describe "Core.kRandomNodesExcludingSelf" $
-      it "excludes self" $ withStore $ \s@Store{..} -> do
-        _ <- atomically $ swapTVar storeMembers $ membersMap (defaultMembers <> [storeSelf])
-        mems <- Core.kRandomNodesExcludingSelf (numToGossip storeCfg) s
-
-        find (== storeSelf) mems `shouldBe` Nothing
-
     describe "Core.kRandomNodes" $ do
       let ms = defaultMembers
 
-      it "takes no nodes if n is 0" $ do
-        rand <- Core.kRandomNodes 0 ms ms
+      it "takes no nodes if n is 0" $ withStore $ \s@Store{..} -> do
+        void $ atomically $ swapTVar storeMembers $ membersMap ms
+
+        rand <- Core.kRandomNodes s 0 ms
         length rand `shouldBe` 0
 
-      it "filters non-alive nodes" $ do
-        rand <- Core.kRandomNodes 3 [] ms
+      it "filters non-alive nodes" $ withStore $ \s@Store{..} -> do
+        void $ atomically $ swapTVar storeMembers $ membersMap ms
+
+        rand <- Core.kRandomNodes s 3 []
         length rand `shouldBe` 1
         head rand `shouldBe` head ms
 
-      it "filters exclusion nodes" $ do
-        rand <- Core.kRandomNodes 3 [head ms] ms
+      it "filters exclusion nodes" $ withStore $ \s@Store{..} -> do
+        void $ atomically $ swapTVar storeMembers $ membersMap ms
+
+        rand <- Core.kRandomNodes s 3 [head ms]
         length rand `shouldBe` 0
 
-      it "shuffles" $ do
-        let alives = replicate total $ head defaultMembers
+      it "shuffles" $ withStore $ \s@Store{..} -> do
+        let alives = zipWith (\m i -> m { memberName = "alive-" <> show i }) (replicate total $ head defaultMembers) [0..]
             total = 200
             n = 50
+        void $ atomically $ swapTVar storeMembers $ membersMap alives
 
-        rand <- Core.kRandomNodes n [] alives
+        rand <- Core.kRandomNodes s n []
         length rand `shouldBe` n
         total `shouldNotBe` n
         rand `shouldNotBe` alives
@@ -177,7 +166,6 @@ main = localhost >>= \hostAddr ->
         gossip <- send s ack
 
         gossip `shouldBe` []
-        -- invokesAckHandler $ seqNo ack
 
       it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
         let indirectPing' = indirectPing addr
@@ -188,4 +176,3 @@ main = localhost >>= \hostAddr ->
 
         beforeInc + 1 `shouldBe` afterInc
         gossip `shouldBe` [Direct (Ping 1 (node indirectPing')) addr]
-        -- invokesAckHandler $ seqNo ack

@@ -31,7 +31,6 @@ import qualified Data.Map.Strict             as Map
 import           Data.Monoid                 ((<>))
 import           Data.Serialize              (decode, encode, get)
 import           Data.Time.Clock             (UTCTime (..), getCurrentTime)
-import           Data.Word                   (Word16, Word32)
 import qualified Network.Socket              as NS
 import           System.Posix.Signals        (Handler (Catch), installHandler,
                                               sigUSR1)
@@ -74,27 +73,15 @@ removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
   modifyTVar (storeMembers s) $ Map.filter (not . isDead)
 
--- gives kRandomNodes excluding our own host from the list
-kRandomNodesExcludingSelf :: Int -> Store -> IO [Member]
-kRandomNodesExcludingSelf numNodes s = do
-  nodes <- atomically $ readTVar $ storeMembers s
-  let self = storeSelf s
-  kRandomNodes numNodes [] (filter (/= self) $ Map.elems nodes)
-
--- select up to k random nodes, excluding a given
--- node and any non-alive nodes. It is possible that less than k nodes are returned.
-kRandomNodes :: Int -> [Member] -> [Member] -> IO [Member]
-kRandomNodes n excludes ms = take n <$> shuffle (filter f ms)
+kRandomNodes :: Store -> Int -> [Member] -> IO [Member]
+kRandomNodes store@Store{..} n excludes = do
+  ms <- atomically $ members store
+  take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
 
 members :: Store -> STM [Member]
 members s = Map.elems <$> readTVar (storeMembers s)
-
-membersAndSelf :: Store -> STM (Member, [Member])
-membersAndSelf s = members s >>= (\ms -> return (self, filter (/= self) ms))
-  where
-    self = storeSelf s
 
 -- we're not using TCP for anything other than initial state sync
 -- so we only handle pushPull / ping
@@ -165,8 +152,8 @@ disseminate _store = awaitForever $ \(Direct msg addr) ->
 -- FIXME: need a timer to mark this node as dead after suspect timeout
 suspectOrDeadNode' :: Store -> Message -> MemberName -> Int -> Liveness -> IO (Maybe Message)
 suspectOrDeadNode' _ _ _ _ IsAlive = error "received IsAlive for suspectOrDeadNode'"
-suspectOrDeadNode' s msg name i suspectOrDead = do
-  (self, membs) <- atomically $ membersAndSelf s
+suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
+  membs <- atomically $ members s
 
   case find ((== name) . memberName) membs of
     -- we don't know this node. ignore.
@@ -176,7 +163,7 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
     Just m | i < memberIncarnation m || livenessCheck m -> return Nothing
 
     -- no cluster, we're not suspect/dead. refute it.
-    Just m | name == memberName self -> do
+    Just m | name == memberName storeSelf -> do
                i' <- atomically $ do
                  nextInc <- nextIncarnation' s $ memberIncarnation m
                  let m' = m { memberIncarnation = nextInc }
@@ -184,7 +171,12 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
 
                -- return so we don't mark ourselves suspect/dead
                -- FIXME: hardcoding!
-               return $ Just $ Alive i' name (1 :: Word32) (1 :: Word16) []
+               let (NS.SockAddrInet port' host) = memberHostNew storeSelf
+               return $ Just Alive { incarnation = i'
+                                   , node = name
+                                   , fromAddr = host
+                                   , port = fromIntegral port'
+                                   , version = []}
 
     -- broadcast suspect/dead msg
     Just m -> do
@@ -202,9 +194,9 @@ suspectOrDeadNode' s msg name i suspectOrDead = do
       IsAlive -> error "received IsAlive for suspectOrDeadNode'"
       IsSuspect -> memberAlive /= IsAlive
       IsDead -> memberAlive == IsDead
-    -- name = case msg of
-    saveMember m =
-      modifyTVar' (storeMembers s) $ Map.insert (memberName m) m
+
+    saveMember m@Member{..} =
+      modifyTVar' storeMembers $ Map.insert memberName m
 
 suspectNode :: Store -> Message -> IO (Maybe Message)
 suspectNode s msg@(Suspect i name) = suspectOrDeadNode' s msg name i IsSuspect
@@ -236,7 +228,7 @@ failureDetector store@Store{..} = do
           void $ forkIO $ do
             currSeqNo <- fromIntegral <$> nextSeqNo store
             -- FIXME: move from random to robust scheme
-            member <- fmap head (kRandomNodesExcludingSelf 1 store)
+            member <- fmap head (kRandomNodes store (numToGossip storeCfg) [])
             void $ probeNode store currSeqNo gossip member
           loop gossip
 
@@ -269,7 +261,8 @@ probeNode store@Store{..} currSeqNo gossip m = void $ runEitherT $ swapEitherT $
                                  , port = fromIntegral port
                                  , node = show m
                                  }
-          membs <- lift $ kRandomNodesExcludingSelf (numToGossip storeCfg) store
+          -- FIXME: must exclude probe members
+          membs <- lift $ kRandomNodes store (numToGossip storeCfg) []
           lift $ mapM_ (`send` msg) membs
 
 main :: IO ()
