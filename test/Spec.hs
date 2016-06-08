@@ -12,7 +12,6 @@ import qualified Data.Conduit.List as CL
 import qualified Data.Conduit.Combinators    as CC
 import qualified Data.Conduit.Network.UDP    as UDP
 import           Data.Monoid ( (<>) )
-import           Data.Foldable ( foldl' )
 import           Data.List (find, sort)
 import           Control.Monad.Identity
 import           Control.Monad.IO.Class      (MonadIO (liftIO))
@@ -21,9 +20,13 @@ import           Data.Time.Calendar ( Day(ModifiedJulianDay) )
 import           Data.Time.Clock ( UTCTime(..), getCurrentTime )
 import           Data.Word ( Word16, Word32, Word8 )
 import           Network.Socket.Internal ( SockAddr(SockAddrInet), PortNumber )
+import           Network.Socket ( HostAddress, inet_addr )
 import           Data.Serialize (decode, encode, get)
 import qualified Data.List.NonEmpty          as NEL
 import           Test.Hspec
+
+import           Data.MessagePack.Aeson (packAeson, unpackAeson)
+import qualified Data.Aeson as A
 
 import qualified Core
 import           Types
@@ -37,19 +40,17 @@ withStore f = configure >>= \ case
 zeroTime :: UTCTime
 zeroTime = UTCTime (ModifiedJulianDay 0) 0
 
-fromOctets :: [Word8] -> Word32
-fromOctets = foldl' accum 0
-  where
-    accum a o = (a `shiftL` 8) .|. fromIntegral o
+localhost :: IO HostAddress
+localhost = inet_addr "127.0.0.1"
 
-sockAddr :: PortNumber -> SockAddr
-sockAddr _port = SockAddrInet _port $ fromOctets $ BS.unpack $ C8.pack "127.0.0.1"
+sockAddr :: HostAddress -> PortNumber -> SockAddr
+sockAddr = flip SockAddrInet
 
-makeMembers :: [Member]
-makeMembers =
-  let seeds = [  ("alive", IsAlive, zeroTime, sockAddr 4001)
-               , ("suspect", IsSuspect, zeroTime, sockAddr 4002)
-               , ("dead", IsDead, zeroTime, sockAddr 4003)]
+makeMembers :: HostAddress -> [Member]
+makeMembers host =
+  let seeds = [  ("alive", IsAlive, zeroTime, sockAddr host 4001)
+               , ("suspect", IsSuspect, zeroTime, sockAddr host 4002)
+               , ("dead", IsDead, zeroTime, sockAddr host 4003)]
   in map (\(name, status, timeChanged, addr) ->
              Member { memberName = name
                     , memberHost = "127.0.0.1"
@@ -57,8 +58,6 @@ makeMembers =
                     , memberIncarnation = 0
                     , memberLastChange = timeChanged
                     , memberHostNew = addr }) seeds
-
-alive = head makeMembers
 
 membersMap :: [Member] -> Map.Map String Member
 membersMap ms =
@@ -71,148 +70,122 @@ currentIncarnation Store{..} = atomically $ readTVar storeIncarnation
 envelope :: [Message] -> Envelope
 envelope msgs = Envelope $ NEL.fromList msgs
 
+backAndForthForeverAndEver :: [Message] -> Either String Envelope
 backAndForthForeverAndEver msgs = decode (encode $ envelope msgs)
 
 main :: IO ()
-main = hspec $ do
-  let addr = sockAddr 4000
---   describe "handleMessage" $ do
---     context "when received Ping" $
---       it "produces an Ack" $ withStore $ \s -> do
---         let ping = Ping { seqNo = 0, node = "node" }
---             event = Event { eventHost = From "sender", eventMsg = Just ping, eventBody = Core.encode ping }
+main = localhost >>= \hostAddr ->
+  hspec $ do
+    let addr = sockAddr hostAddr 4000
+        defaultMembers = makeMembers hostAddr
 
---         res <- CL.sourceList [udpMsg' event] $$ Core.handleMessage s $= CL.consume
---         let events = map Core.fromMsg res
---             e = head events
+    describe "wire protocol" $
+      it "encodes & decodes" $ do
+        let msgPack = unpackAeson . packAeson
+            json = A.decode . A.encode
+            ping = Ping { seqNo = 1, node = "a" }
+            indirectPing = IndirectPing { seqNo = 2, target = 1, port = 4000 :: Word16, node = "b" }
+            ack = Ack { seqNo = 2, payload = [] }
+            ping2 = Ping { seqNo = 3, node = "b" }
+            ack2 = Ack { seqNo = 4, payload = [] }
+            msgs = [ping, ack, ping2, ack2]
 
---         length events `shouldBe` 1
---         eventHost e `shouldBe` To (show sockAddr)
---         eventMsg e `shouldBe` Just Ack { seqNo = seqNo ping, payload = [] }
+        json ping `shouldBe` Just ping
+        json indirectPing `shouldBe` Just indirectPing
 
---     context "when received Ack" $ do
---       it "it's ignored" $ withStore $ \s -> do
---         let ack = Ack { seqNo = 0, payload = [] }
---             event = Event { eventHost = From "sender", eventMsg = Just ack, eventBody = Core.encode ack }
---         res <- CL.sourceList [udpMsg' event] $$ Core.handleMessage s $= CL.consume
+        msgPack ping `shouldBe` Just ping
+        msgPack indirectPing `shouldBe` Just indirectPing
 
---         length res `shouldBe` 0
+        backAndForthForeverAndEver [ping] `shouldBe` Right (envelope [ping])
+        backAndForthForeverAndEver [indirectPing] `shouldBe` Right (envelope [indirectPing])
+        backAndForthForeverAndEver msgs `shouldBe` Right (envelope msgs)
 
-  describe "wire protocol" $ do
-    it "encodes & decodes" $ do
-      let ping = Ping { seqNo = 1, node = "a" }
-          indirectPing = IndirectPing { seqNo = 1, target = 1, port = 4000, node = "a" }
+    describe "Core.removeDeadNodes" $
+      it "removes dead members" $ withStore $ \s@Store{..} -> do
+        _ <- atomically $ do
+          void $ swapTVar storeMembers $ membersMap defaultMembers
+          void $ Core.removeDeadNodes s
+        mems' <- atomically $ readTVar storeMembers
 
-      backAndForthForeverAndEver [ping] `shouldBe` Right (envelope [ping])
-      backAndForthForeverAndEver [indirectPing] `shouldBe` Right (envelope [indirectPing])
+        Map.notMember "dead" mems' `shouldBe` True
+        Map.size mems' `shouldBe` 2
 
-    it "encodes & decodes envelope/compound" $ do
-      let ping1 = Ping { seqNo = 1, node = "a" }
-          ack1 = Ack { seqNo = 2, payload = [] }
-          ping2 = Ping { seqNo = 3, node = "b" }
-          ack2 = Ack { seqNo = 4, payload = [] }
-          msgs = [ping1, ack1, ping2, ack2]
+    describe "Core.membersAndSelf" $
+      it "gives self fst and everyone else snd" $ withStore $ \s@Store{..} -> do
+        let mems = defaultMembers
 
-      backAndForthForeverAndEver msgs `shouldBe` Right (envelope msgs)
+        _ <- atomically $ swapTVar storeMembers $ membersMap (mems <> [storeSelf])
+        (self', mems') <- atomically $ Core.membersAndSelf s
 
-  describe "Core.removeDeadNodes" $
-    it "removes dead members" $ withStore $ \s@Store{..} -> do
-      _ <- atomically $ do
-        void $ swapTVar storeMembers $ membersMap makeMembers
-        void $ Core.removeDeadNodes s
-      mems' <- atomically $ readTVar storeMembers
+        storeSelf `shouldBe` self'
+        find (== storeSelf) mems' `shouldBe` Nothing
+        sort mems `shouldBe` sort mems'
 
-      Map.notMember "dead" mems' `shouldBe` True
-      Map.size mems' `shouldBe` 2
+    describe "Core.kRandomNodesExcludingSelf" $
+      it "excludes self" $ withStore $ \s@Store{..} -> do
+        _ <- atomically $ swapTVar storeMembers $ membersMap (defaultMembers <> [storeSelf])
+        mems <- Core.kRandomNodesExcludingSelf (numToGossip storeCfg) s
 
-  describe "Core.membersAndSelf" $
-    it "gives self fst and everyone else snd" $ withStore $ \s@Store{..} -> do
-      let mems = makeMembers
+        find (== storeSelf) mems `shouldBe` Nothing
 
-      _ <- atomically $ swapTVar storeMembers $ membersMap (mems <> [storeSelf])
-      (self', mems') <- atomically $ Core.membersAndSelf s
+    describe "Core.kRandomNodes" $ do
+      let ms = defaultMembers
 
-      storeSelf `shouldBe` self'
-      find (== storeSelf) mems' `shouldBe` Nothing
-      sort mems `shouldBe` sort mems'
+      it "takes no nodes if n is 0" $ do
+        rand <- Core.kRandomNodes 0 ms ms
+        length rand `shouldBe` 0
 
-  describe "Core.kRandomNodesExcludingSelf" $
-    it "excludes self" $ withStore $ \s@Store{..} -> do
-      _ <- atomically $ swapTVar storeMembers $ membersMap (makeMembers <> [storeSelf])
-      mems <- Core.kRandomNodesExcludingSelf (numToGossip storeCfg) s
+      it "filters non-alive nodes" $ do
+        rand <- Core.kRandomNodes 3 [] ms
+        length rand `shouldBe` 1
+        head rand `shouldBe` head ms
 
-      find (== storeSelf) mems `shouldBe` Nothing
-      length mems `shouldBe` 3
+      it "filters exclusion nodes" $ do
+        rand <- Core.kRandomNodes 3 [head ms] ms
+        length rand `shouldBe` 0
 
-  describe "Core.kRandomNodes" $ do
-    let ms = makeMembers
+      it "shuffles" $ do
+        let alives = replicate total $ head defaultMembers
+            total = 200
+            n = 50
 
-    it "takes no nodes if n is 0" $ do
-      rand <- Core.kRandomNodes 0 ms ms
-      length rand `shouldBe` 0
+        rand <- Core.kRandomNodes n [] alives
+        length rand `shouldBe` n
+        total `shouldNotBe` n
+        rand `shouldNotBe` alives
 
-    it "filters non-alive nodes" $ do
-      rand <- Core.kRandomNodes 3 [] ms
-      length rand `shouldBe` 1
-      head rand `shouldBe` head ms
+    describe "Core.handleUDPMessage" $ do
+      let ping = Ping 1 "myself"
+          ack = Ack 1 []
+          indirectPing (SockAddrInet port target) = IndirectPing 1 (fromIntegral target) (fromIntegral port) "other"
+          send s msg = do
+            let udpMsg = UDP.Message (encode $ envelope [msg]) addr
+            CL.sourceList [udpMsg] $$ Core.handleUDPMessage s =$= CC.sinkList
+          invokesAckHandler = undefined
 
-    it "filters exclusion nodes" $ do
-      rand <- Core.kRandomNodes 3 [head ms] ms
-      length rand `shouldBe` 0
+      it "gets Ping for us, responds with Ack" $ withStore $ \s@Store{..} -> do
+        gossip <- send s ping
 
-    it "shuffles" $ do
-      let alives = map (const alive) [0..n]
-          n = 200
+        gossip `shouldBe` [Direct (Ack 1 []) addr]
 
-      rand <- Core.kRandomNodes n [] alives
-      length rand `shouldBe` n
-      rand `shouldNotBe` alives
+      it "gets Ping for someone else, ignores msg" $ withStore $ \s@Store{..} -> do
+        gossip <- send s $ Ping 1 "unknown-node"
 
-  describe "Core.handleUDPMessage FIXME" $ do
-    let ping = Ping 1 "myself"
-        ack = Ack 1 []
-        send s msg = do
-          let udpMsg = UDP.Message (encode msg) (sockAddr 4000)
-          CL.sourceList [udpMsg] $$ Core.handleUDPMessage s =$= CC.sinkList
-        invokesAckHandler = undefined
+        gossip `shouldBe` []
 
-    it "gets Ping, sends Ack" $ withStore $ \s@Store{..} -> do
-      gossip <- send s ping
+      it "gets Ack, invokes ackHandler" $ withStore $ \s@Store{..} -> do
+        gossip <- send s ack
 
-      head gossip `shouldBe` Direct (Ack 1 []) (sockAddr 4000)
+        gossip `shouldBe` []
+        -- invokesAckHandler $ seqNo ack
 
-  describe "Core.handleUDPMessage" $ do
-    let ping = Ping 1 "myself"
-        ack = Ack 1 []
-        indirectPing (SockAddrInet target port) = IndirectPing 1 (fromIntegral target) (fromIntegral port) "other"
-        send s msg = do
-          let udpMsg = UDP.Message (encode (Envelope $ NEL.fromList [msg])) addr
-          CL.sourceList [udpMsg] $$ Core.handleUDPMessage s =$= CC.sinkList
-        invokesAckHandler = undefined
+      it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
+        let indirectPing' = indirectPing addr
+            udpMsg = UDP.Message (encode $ envelope [indirectPing']) addr
+        beforeInc <- currentIncarnation s
+        gossip <- send s indirectPing'
+        afterInc <- currentIncarnation s
 
-    it "gets Ping for us, responds with Ack" $ withStore $ \s@Store{..} -> do
-      gossip <- send s ping
-
-      gossip `shouldBe` [Direct (Ack 1 []) addr]
-
-    it "gets Ping for someone else, ignores msg" $ withStore $ \s@Store{..} -> do
-      gossip <- send s $ Ping 1 "unknown-node"
-
-      gossip `shouldBe` []
-
-    it "gets Ack, invokes ackHandler" $ withStore $ \s@Store{..} -> do
-      gossip <- send s ack
-
-      gossip `shouldBe` []
-      -- invokesAckHandler $ seqNo ack
-
-    it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
-      let indirectPing' = indirectPing addr
-          udpMsg = UDP.Message (encode (Envelope $ NEL.fromList [indirectPing'])) addr
-      beforeInc <- currentIncarnation s
-      gossip <- send s indirectPing'
-      afterInc <- currentIncarnation s
-
-      beforeInc + 1 `shouldBe` afterInc
-      gossip `shouldBe` [Direct (Ping 1 (node indirectPing')) addr]
-      -- invokesAckHandler $ seqNo ack
+        beforeInc + 1 `shouldBe` afterInc
+        gossip `shouldBe` [Direct (Ping 1 (node indirectPing')) addr]
+        -- invokesAckHandler $ seqNo ack

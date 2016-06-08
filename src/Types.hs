@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE ViewPatterns #-}
@@ -7,12 +8,12 @@ module Types where
 import           Control.Monad (replicateM)
 import           Control.Concurrent.STM.TVar
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
-import           Data.Aeson.Types
+import           Data.Aeson.Types (ToJSON, FromJSON)
+import           GHC.Generics
 import           Control.Monad.Identity (unless)
 import qualified Data.ByteString as BS (length)
 import qualified Data.Conduit.Network.UDP as UDP ( Message(..) )
 import           Data.Conduit.TMChan (TMChan)
-import           Data.Foldable (asum)
 import           Data.List.NonEmpty ( NonEmpty(..) )
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map.Strict as Map
@@ -138,7 +139,11 @@ data Message = Ping { seqNo :: Word32
              --        , node        :: String
              --        , deadFrom        :: String
              --        }
-    deriving (Eq, Show)
+    deriving (Eq, Show, Generic)
+
+instance ToJSON Message
+
+instance FromJSON Message
 
 instance Serialize Message where
   put = putLazyByteString . packAeson
@@ -168,45 +173,6 @@ msgIndex m = case m of
   Dead{..} -> fromIntegral $ fromEnum DeadMsg
   -- PushPull{..} -> fromIntegral $ fromEnum PushPullMsg
   -- Compound _ -> fromIntegral $ fromEnum CompoundMsg
-
-instance FromJSON Message where
-  parseJSON = withObject "message" $ \o -> asum [
-    Ping <$> o .: "SeqNo" <*> o .: "Node",
-    IndirectPing <$> o .: "SeqNo" <*> o .: "Target" <*> o .: "Port" <*> o .: "Node",
-    Ack <$> o .: "SeqNo" <*> o .: "Payload",
-    Suspect <$> o .: "Incarnation" <*> o .: "Node",
-    Alive <$> o .: "Incarnation" <*> o .: "Node" <*> o .: "FromAddr" <*> o .: "Port" <*> o .: "Version",
-    Dead <$> o .: "Incarnation" <*> o .: "Node" <*> o .: "DeadFrom"]
-
-instance ToJSON Message where
-  toJSON Ping{..} = object [
-    "SeqNo" .= seqNo,
-    "Node"  .= node ]
-
-  toJSON IndirectPing{..} = object [
-    "SeqNo" .= seqNo,
-    "Target" .= target,
-    "Port"  .= port,
-    "Node"  .= node ]
-
-  toJSON Ack{..} = object [
-    "SeqNo" .= seqNo,
-    "Payload"  .= payload ]
-
-  toJSON Suspect{..} = object [
-    "Incarnation" .= incarnation,
-    "Node"  .= node ]
-
-  toJSON Alive{..} = object [
-    "Incarnation" .= incarnation,
-    "Node"  .= node,
-    "FromAddr"  .= fromAddr,
-    "Port"  .= port ]
-
-  toJSON Dead{..} = object [
-    "Incarnation" .= incarnation,
-    "Node"  .= node,
-    "DeadFrom"  .= deadFrom ]
 
 instance Show UDP.Message where
   show (UDP.Message msgData msgSender) =

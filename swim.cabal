@@ -58,6 +58,7 @@ test-suite swim-test
   hs-source-dirs:      test
   main-is:             Spec.hs
   build-depends:       base
+                     , aeson
                      , bytestring
                      , cereal
                      , conduit
@@ -66,6 +67,8 @@ test-suite swim-test
                      , containers
                      , hspec
                      , hspec-expectations
+                     , msgpack
+                     , msgpack-aeson == 0.1.0.0
                      , mtl
                      , network
                      , semigroups

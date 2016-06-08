@@ -122,7 +122,7 @@ handleUDPMessage store =
     process sender = \ case
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
-        traceIO "got ack!"
+        -- traceIO "got ack!"
         _ <- liftIO $ getCurrentTime >>= (\t -> atomically $ invokeAckHandler store (seqNo',t))
         return []
 
