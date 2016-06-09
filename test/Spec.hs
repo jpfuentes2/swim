@@ -105,26 +105,26 @@ main = localhost >>= \hostAddr ->
         Map.notMember "dead" mems' `shouldBe` True
         Map.size mems' `shouldBe` 2
 
-    describe "Core.kRandomNodes" $ do
+    describe "Core.kRandomMembers" $ do
       let ms = defaultMembers
 
       it "takes no nodes if n is 0" $ withStore $ \s@Store{..} -> do
         void $ atomically $ swapTVar storeMembers $ membersMap ms
 
-        rand <- Core.kRandomNodes s 0 ms
+        rand <- Core.kRandomMembers s 0 ms
         length rand `shouldBe` 0
 
       it "filters non-alive nodes" $ withStore $ \s@Store{..} -> do
         void $ atomically $ swapTVar storeMembers $ membersMap ms
 
-        rand <- Core.kRandomNodes s 3 []
+        rand <- Core.kRandomMembers s 3 []
         length rand `shouldBe` 1
         head rand `shouldBe` head ms
 
       it "filters exclusion nodes" $ withStore $ \s@Store{..} -> do
         void $ atomically $ swapTVar storeMembers $ membersMap ms
 
-        rand <- Core.kRandomNodes s 3 [head ms]
+        rand <- Core.kRandomMembers s 3 [head ms]
         length rand `shouldBe` 0
 
       it "shuffles" $ withStore $ \s@Store{..} -> do
@@ -133,7 +133,7 @@ main = localhost >>= \hostAddr ->
             n = 50
         void $ atomically $ swapTVar storeMembers $ membersMap alives
 
-        rand <- Core.kRandomNodes s n []
+        rand <- Core.kRandomMembers s n []
         length rand `shouldBe` n
         total `shouldNotBe` n
         rand `shouldNotBe` alives
@@ -161,6 +161,7 @@ main = localhost >>= \hostAddr ->
         gossip <- send s ack
 
         gossip `shouldBe` []
+        fail "invokesAckHandler"
 
       it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
         let indirectPing' = indirectPing addr

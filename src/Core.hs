@@ -69,8 +69,8 @@ removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
   modifyTVar' (storeMembers s) $ Map.filter (not . isDead)
 
-kRandomNodes :: Store -> Int -> [Member] -> IO [Member]
-kRandomNodes store@Store{..} n excludes = do
+kRandomMembers :: Store -> Int -> [Member] -> IO [Member]
+kRandomMembers store@Store{..} n excludes = do
   ms <- atomically $ members store
   take n <$> shuffle (filter f ms)
   where
@@ -258,7 +258,7 @@ probeNode store@Store{..} currSeqNo gossip m = void $ runEitherT $ swapEitherT $
                                  , node = show m
                                  }
           -- FIXME: must exclude probe members
-          membs <- lift $ kRandomNodes store (numToGossip storeCfg) []
+          membs <- lift $ kRandomMembers store (numToGossip storeCfg) []
           lift $ mapM_ (`send` msg) membs
 
 main :: IO ()
