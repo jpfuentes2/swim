@@ -228,8 +228,8 @@ failureDetector store@Store{..} = do
           void $ forkIO $ do
             currSeqNo <- fromIntegral <$> nextSeqNo store
             -- FIXME: move from random to robust scheme
-            member <- fmap head (kRandomNodes store (numToGossip storeCfg) [])
-            void $ probeNode store currSeqNo gossip member
+            ms <- kRandomMembers store (numToGossip storeCfg) []
+            mapM_ (probeNode store currSeqNo gossip) ms
           loop gossip
 
 probeNode :: Store -> SeqNo -> TMChan Gossip -> Member -> IO ()
