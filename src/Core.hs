@@ -6,34 +6,30 @@
 
 module Core where
 
-import           Control.Concurrent          (forkIO)
-import           Control.Concurrent.Async    (race, race_)
-import           Control.Concurrent.STM      (STM, atomically)
-import           Control.Concurrent.STM.TVar
-import           Control.Monad.Identity
-import           Control.Monad.IO.Class      (MonadIO (liftIO))
-import           Control.Monad.Trans.Class   (lift)
-import           Control.Monad.Trans.Either  (EitherT (..), hoistEither, runEitherT, swapEitherT, )
-import qualified Data.ByteString             as BS
-import           Data.Conduit                (Conduit, Source, awaitForever,
-                                              yield, ($$), (=$=))
-import           Data.Conduit.Cereal         (conduitGet)
-import qualified Data.Conduit.Combinators    as CC
-import           Data.Conduit.Network        (appSink, appSockAddr, appSource,
-                                              runTCPServer, serverSettings)
-import           Data.Conduit.Network.UDP    (sinkToSocket)
-import qualified Data.Conduit.Network.UDP    as UDP
-import           Data.Conduit.TMChan         (TMChan, newTMChanIO, sinkTMChan,
-                                              sourceTMChan, writeTMChan)
-import           Data.Foldable               (find)
-import qualified Data.List.NonEmpty          as NEL
-import qualified Data.Map.Strict             as Map
-import           Data.Monoid                 ((<>))
-import           Data.Serialize              (decode, encode, get)
-import           Data.Time.Clock             (UTCTime (..), getCurrentTime)
-import qualified Network.Socket              as NS
-import           System.Posix.Signals        (Handler (Catch), installHandler,
-                                              sigUSR1)
+import           Control.Concurrent (forkIO)
+import           Control.Concurrent.Async (race, race_)
+import           Control.Concurrent.STM (STM, atomically)
+import           Control.Concurrent.STM.TVar (TVar, readTVar, writeTVar, modifyTVar')
+import           Control.Monad.IO.Class (MonadIO (liftIO))
+import           Control.Monad.Identity (unless, void)
+import           Control.Monad.Trans.Class (lift)
+import           Control.Monad.Trans.Either (EitherT (..), hoistEither, runEitherT, swapEitherT)
+import qualified Data.ByteString as BS
+import           Data.Conduit (Conduit, Source, awaitForever, yield, ($$), (=$=))
+import           Data.Conduit.Cereal (conduitGet)
+import qualified Data.Conduit.Combinators as CC
+import           Data.Conduit.Network (appSink, appSockAddr, appSource, runTCPServer, serverSettings)
+import qualified Data.Conduit.Network.UDP as UDP
+import           Data.Conduit.TMChan (TMChan, newTMChanIO, sinkTMChan, sourceTMChan, writeTMChan)
+import           Data.Foldable (find)
+import qualified Data.List.NonEmpty as NEL
+import qualified Data.Map.Strict as Map
+import           Data.Monoid ((<>))
+import           Data.Serialize (decode, encode, get)
+import           Data.Time.Clock (UTCTime (..), getCurrentTime)
+import qualified Network.Socket as NS
+import           System.Posix.Signals (Handler (Catch), installHandler, sigUSR1)
+
 import           Types
 import           Util
 
@@ -71,7 +67,7 @@ nextIncarnation' s n = do
 
 removeDeadNodes :: Store -> STM ()
 removeDeadNodes s =
-  modifyTVar (storeMembers s) $ Map.filter (not . isDead)
+  modifyTVar' (storeMembers s) $ Map.filter (not . isDead)
 
 kRandomNodes :: Store -> Int -> [Member] -> IO [Member]
 kRandomNodes store@Store{..} n excludes = do
@@ -283,6 +279,6 @@ main = do
           failureDetector store $$ sinkTMChan gossip False
 
         disseminate' =
-          sourceTMChan gossip $$ disseminate store =$= sinkToSocket sock
+          sourceTMChan gossip $$ disseminate store =$= UDP.sinkToSocket sock
     -- FIXME: can I get away with forM_ ?
     in tcpServer `race_` udpReceiver `race_` disseminate' `race_` failureDetector'

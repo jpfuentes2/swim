@@ -2,27 +2,23 @@
 {-# LANGUAGE RecordWildCards   #-}
 {-# LANGUAGE LambdaCase #-}
 
-import           Control.Concurrent.STM ( atomically )
-import           Data.Bits (shiftL, (.|.))
-import qualified Data.ByteString as BS
-import qualified Data.ByteString.Char8 as C8
+import           Control.Concurrent.STM (atomically)
 import           Control.Concurrent.STM.TVar (swapTVar, readTVar)
 import           Data.Conduit
 import qualified Data.Conduit.List as CL
-import qualified Data.Conduit.Combinators    as CC
-import qualified Data.Conduit.Network.UDP    as UDP
-import           Data.Monoid ( (<>) )
-import           Data.List (find, sort)
+import qualified Data.Conduit.Combinators as CC
+import qualified Data.Conduit.Network.UDP as UDP
+import           Data.Monoid ((<>))
 import           Control.Monad.Identity
-import           Control.Monad.IO.Class      (MonadIO (liftIO))
+import           Control.Monad.IO.Class (MonadIO (liftIO))
 import qualified Data.Map.Strict as Map
 import           Data.Time.Calendar ( Day(ModifiedJulianDay) )
-import           Data.Time.Clock ( UTCTime(..), getCurrentTime )
-import           Data.Word ( Word16, Word32, Word8 )
+import           Data.Time.Clock ( UTCTime(..) )
+import           Data.Word ( Word16 )
 import           Network.Socket.Internal ( SockAddr(SockAddrInet), PortNumber )
 import           Network.Socket ( HostAddress, inet_addr )
-import           Data.Serialize (decode, encode, get)
-import qualified Data.List.NonEmpty          as NEL
+import           Data.Serialize (decode, encode)
+import qualified Data.List.NonEmpty as NEL
 import           Test.Hspec
 
 import           Data.MessagePack.Aeson (packAeson, unpackAeson)
@@ -65,7 +61,6 @@ membersMap ms =
 
 currentIncarnation :: Store -> IO Int
 currentIncarnation Store{..} = atomically $ readTVar storeIncarnation
--- sockAddr = SockAddrInet 4002 $ fromOctets $ BS.unpack $ C8.pack "127.0.0.1"
 
 envelope :: [Message] -> Envelope
 envelope msgs = Envelope $ NEL.fromList msgs
