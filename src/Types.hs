@@ -37,7 +37,9 @@ type Timeout = (UTCTime, UTCTime)
 -- replace with SockAddr
 type Host = String
 
-data Gossip = Direct Message SockAddr | Broadcast Message deriving (Show, Eq)
+data Gossip = Direct Message SockAddr
+            | Broadcast Message
+    deriving (Show, Eq)
 
 data Config = Config { bindHost :: String
                      , joinHosts :: NonEmpty String
@@ -53,20 +55,15 @@ data Store = Store { storeSeqNo :: TVar Int
                    , storeSelf :: Member
                    , storeCfg :: Config
                    , storeGossip :: TMChan Gossip
---                   , storeGossip :: AckHandler
-                   -- , storeHandlers :: TVar( Map.Map Word32 )
                    }
 
--- Member
 data Member = Member { memberName        :: String
                      , memberHost        :: Host
                      , memberHostNew     :: SockAddr
                      , memberAlive       :: Liveness
                      , memberIncarnation :: Int
                      , memberLastChange  :: UTCTime
-                     -- , memberMeta :: ByteString
-                     }
-    deriving (Show, Eq)
+                     } deriving (Show, Eq)
 
 type MemberName = String
 
@@ -79,7 +76,8 @@ data Liveness = IsAlive | IsSuspect | IsDead
 
 -- |Wrapper of a series of 'Message's which are transmitted together.
 -- If a single message, then encoded alone, otherwise encoded as a compound message
-newtype Envelope = Envelope { unEnvelope :: NonEmpty Message } deriving (Eq, Show)
+newtype Envelope = Envelope { unEnvelope :: NonEmpty Message }
+    deriving (Eq, Show)
 
 -- FIXME? this protocol is totally weird - includes a message type which is ignored if it's
 -- not the compound message type
@@ -113,32 +111,30 @@ instance Serialize Envelope where
 data Message = Ping { seqNo :: Word32
                     , node  :: String
                     }
-             | IndirectPing { seqNo :: Word32
-                            , target  :: Word32
-                            , port  :: Word16
-                            , node  :: String
+             | IndirectPing { seqNo  :: Word32
+                            , target :: Word32
+                            , port   :: Word16
+                            , node   :: String
                             }
              | Ack { seqNo   :: Word32
                    , payload :: [Word8]
                    }
              | Suspect { incarnation :: Int
                        , node        :: String
-                       -- , from        :: String
                        }
              | Alive { incarnation :: Int
                      , node        :: String
-                     , fromAddr        :: Word32
+                     , fromAddr    :: Word32
                      , port        :: Word16
-                     , version         :: [Word8]
                      }
              | Dead { incarnation :: Int
                     , node        :: String
-                    , deadFrom        :: String
+                    , deadFrom    :: String
                     }
-             -- | PushPull { incarnation :: Int
-             --        , node        :: String
-             --        , deadFrom        :: String
-             --        }
+    -- | PushPull { incarnation :: Int
+    --        , node        :: String
+    --        , deadFrom        :: String
+    --        }
     deriving (Eq, Show, Generic)
 
 instance ToJSON Message

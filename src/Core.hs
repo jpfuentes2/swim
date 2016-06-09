@@ -57,32 +57,32 @@ nextIncarnation = atomicIncr . storeIncarnation
 
 -- ensures nextIncarnation is >= Int
 nextIncarnation' :: Store -> Int -> STM Int
-nextIncarnation' s n = do
-  inc <- readTVar (storeIncarnation s)
+nextIncarnation' store@Store{..} n = do
+  inc <- readTVar storeIncarnation
   let inc' = succ inc
   if n >= inc' then
-     nextIncarnation' s n
+     nextIncarnation' store n
   else
-     writeTVar (storeIncarnation s) inc' >> return inc'
+     writeTVar storeIncarnation inc' >> return inc'
 
 removeDeadNodes :: Store -> STM ()
-removeDeadNodes s =
-  modifyTVar' (storeMembers s) $ Map.filter (not . isDead)
+removeDeadNodes Store{..} =
+  modifyTVar' storeMembers $ Map.filter (not . isDead)
 
 kRandomMembers :: Store -> Int -> [Member] -> IO [Member]
-kRandomMembers store@Store{..} n excludes = do
+kRandomMembers store n excludes = do
   ms <- atomically $ members store
   take n <$> shuffle (filter f ms)
   where
     f m = notElem m excludes && IsAlive == memberAlive m
 
 members :: Store -> STM [Member]
-members s = Map.elems <$> readTVar (storeMembers s)
+members Store{..} = Map.elems <$> readTVar storeMembers
 
 -- we're not using TCP for anything other than initial state sync
 -- so we only handle pushPull / ping
 handleTCPMessage :: Store -> NS.SockAddr -> Conduit BS.ByteString IO BS.ByteString
-handleTCPMessage _store _sockAddr =
+handleTCPMessage Store{..} _sockAddr =
   conduitGet get =$= CC.map unEnvelope =$= CC.concat =$= CC.mapM process
   where
     process :: Message -> IO BS.ByteString
@@ -105,7 +105,6 @@ handleUDPMessage store =
     process sender = \ case
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
-        -- traceIO "got ack!"
         _ <- liftIO $ getCurrentTime >>= (\t -> atomically $ invokeAckHandler store (seqNo',t))
         return []
 
@@ -123,7 +122,18 @@ handleUDPMessage store =
         return [ Direct Ping { seqNo = fromIntegral next, node = node' } $
                         NS.SockAddrInet (fromIntegral port') target' ]
 
-      _ -> return []
+      msg@Suspect{..} ->
+        maybeBroadcast $ suspectNode store msg
+
+      msg@Dead{..} ->
+        maybeBroadcast $ deadNode store msg
+
+      msg@Alive{..} ->
+        maybeBroadcast $ aliveNode store msg
+
+    maybeBroadcast :: IO (Maybe Message) -> IO [Gossip]
+    maybeBroadcast msg =
+      maybe [] (\m -> [Broadcast m]) <$> msg
 
 -- disseminate receives messages for gossiping to other members
 -- ping/indirect-ping
@@ -141,7 +151,7 @@ disseminate _store = awaitForever $ \(Direct msg addr) ->
   where gossip msg addr =
           yield $ UDP.Message (encode msg) addr
 
-        -- FIXME: need to add priority queue and then have send pull from that to create compound msg
+        -- FIXME: add priority queue and then have send pull from that to create compound msg
         enqueue _msg _addr =
           return ()
 
@@ -166,13 +176,11 @@ suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
                  saveMember m' >> return nextInc
 
                -- return so we don't mark ourselves suspect/dead
-               -- FIXME: hardcoding!
-               let (NS.SockAddrInet port' host) = memberHostNew storeSelf
+               let (NS.SockAddrInet port host) = memberHostNew storeSelf
                return $ Just Alive { incarnation = i'
                                    , node = name
                                    , fromAddr = host
-                                   , port = fromIntegral port'
-                                   , version = []}
+                                   , port = fromIntegral port }
 
     -- broadcast suspect/dead msg
     Just m -> do
@@ -201,6 +209,10 @@ suspectNode _ _ = undefined
 deadNode :: Store -> Message -> IO (Maybe Message)
 deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
 deadNode _ _ = undefined
+
+aliveNode :: Store -> Message -> IO (Maybe Message)
+aliveNode = undefined
+-- aliveNode s msg@(Alive i name _ _) = undefined
 
 invokeAckHandler :: Store -> (SeqNo, UTCTime) -> STM ()
 invokeAckHandler Store{..} = writeTMChan storeAckHandler
