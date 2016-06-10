@@ -95,7 +95,7 @@ makeSelf _ =
   Member { memberName = "myself"
          , memberHost = "localhost"
          , memberHostNew = SockAddrInet 123 4000
-         , memberAlive = IsAlive
+         , memberAlive = IsAliveC
          , memberIncarnation = 0
          , memberLastChange = UTCTime (ModifiedJulianDay 0) 0
          }

@@ -1,4 +1,5 @@
 {-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE GADTs             #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE Rank2Types        #-}
 {-# LANGUAGE RecordWildCards   #-}
@@ -34,10 +35,10 @@ import           Types
 import           Util
 
 isAlive :: Member -> Bool
-isAlive = (== IsAlive) . memberAlive
+isAlive = (== IsAliveC) . memberAlive
 
 isDead :: Member -> Bool
-isDead = (== IsDead) . memberAlive
+isDead = (== IsDeadC) . memberAlive
 
 notAlive :: Member -> Bool
 notAlive = not . isAlive
@@ -74,7 +75,7 @@ kRandomMembers store n excludes = do
   ms <- atomically $ members store
   take n <$> shuffle (filter f ms)
   where
-    f m = notElem m excludes && IsAlive == memberAlive m
+    f m = notElem m excludes && isAlive m
 
 members :: Store -> STM [Member]
 members Store{..} = Map.elems <$> readTVar storeMembers
@@ -156,8 +157,7 @@ disseminate _store = awaitForever $ \(Direct msg addr) ->
           return ()
 
 -- FIXME: need a timer to mark this node as dead after suspect timeout
-suspectOrDeadNode' :: Store -> Message -> MemberName -> Int -> Liveness -> IO (Maybe Message)
-suspectOrDeadNode' _ _ _ _ IsAlive = error "received IsAlive for suspectOrDeadNode'"
+suspectOrDeadNode' :: NotAlive n => Store -> Message -> MemberName -> Int -> Liveness' n -> IO (Maybe Message)
 suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
   membs <- atomically $ members s
 
@@ -179,7 +179,7 @@ suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
                let (NS.SockAddrInet port host) = memberHostNew storeSelf
                return $ Just Alive { incarnation = i'
                                    , node = name
-                                   , fromAddr = host
+                                   , addr = host
                                    , port = fromIntegral port }
 
     -- broadcast suspect/dead msg
@@ -187,7 +187,9 @@ suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
       getCurrentTime >>= \now ->
         atomically $ do
           let m' = m { memberIncarnation = i
-                   , memberAlive = suspectOrDead
+                   , memberAlive = case suspectOrDead of
+                       IsDead -> IsDeadC
+                       IsSuspect -> IsSuspectC
                    , memberLastChange = now }
           saveMember m'
 
@@ -195,9 +197,8 @@ suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
 
   where
     livenessCheck Member{..} = case suspectOrDead of
-      IsAlive -> error "received IsAlive for suspectOrDeadNode'"
-      IsSuspect -> memberAlive /= IsAlive
-      IsDead -> memberAlive == IsDead
+      IsSuspect -> memberAlive /= IsAliveC
+      IsDead -> memberAlive == IsDeadC
 
     saveMember m@Member{..} =
       modifyTVar' storeMembers $ Map.insert memberName m

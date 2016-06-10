@@ -1,4 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE LambdaCase #-}
@@ -71,8 +74,17 @@ instance Ord Member where
   compare a b = compare (memberName a) (memberName b)
 
 -- The state of a Member
-data Liveness = IsAlive | IsSuspect | IsDead
+data Liveness = IsAliveC | IsSuspectC | IsDeadC
     deriving (Eq, Show, Read, Enum, Bounded)
+
+data Liveness' (l :: Liveness) where
+  IsAlive :: Liveness' 'IsAliveC
+  IsSuspect :: Liveness' 'IsSuspectC
+  IsDead :: Liveness' 'IsDeadC
+
+class NotAlive (l :: Liveness)
+instance NotAlive 'IsSuspectC
+instance NotAlive 'IsDeadC
 
 -- |Wrapper of a series of 'Message's which are transmitted together.
 -- If a single message, then encoded alone, otherwise encoded as a compound message
@@ -124,7 +136,7 @@ data Message = Ping { seqNo :: Word32
                        }
              | Alive { incarnation :: Int
                      , node        :: String
-                     , fromAddr    :: Word32
+                     , addr        :: Word32
                      , port        :: Word16
                      }
              | Dead { incarnation :: Int
