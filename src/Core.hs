@@ -103,7 +103,7 @@ handleUDPMessage store =
     handleDecodeErrors = awaitForever $ either fail yield
 
     process :: NS.SockAddr -> Message -> IO [Gossip]
-    process sender = \ case
+    process sender msg = case msg of
       -- invoke ack handler for the sequence
       Ack seqNo' _ -> do
         _ <- liftIO $ getCurrentTime >>= (\t -> atomically $ invokeAckHandler store (seqNo',t))
@@ -123,13 +123,13 @@ handleUDPMessage store =
         return [ Direct Ping { seqNo = fromIntegral next, node = node' } $
                         NS.SockAddrInet (fromIntegral port') target' ]
 
-      msg@Suspect{..} ->
+      Suspect{..} ->
         maybeBroadcast $ suspectNode store msg
 
-      msg@Dead{..} ->
+      Dead{..} ->
         maybeBroadcast $ deadNode store msg
 
-      msg@Alive{..} ->
+      Alive{..} ->
         maybeBroadcast $ aliveNode store msg
 
     maybeBroadcast :: IO (Maybe Message) -> IO [Gossip]
@@ -141,20 +141,18 @@ handleUDPMessage store =
 -- messages other than Ping/IndirectPing/Ack are enqueued for piggy-backing
 -- while ping/indirect-ping/ack are immediately sent
 disseminate :: Store -> Conduit Gossip IO UDP.Message
-disseminate _store = awaitForever $ \(Direct msg addr) ->
+disseminate _store = awaitForever $ \ case
   -- send ping/indirect-ping/ack immediately and enqueue everything else
-  case msg of
-    Ping{..} -> gossip msg addr
-    Ack{..} -> gossip msg addr
-    IndirectPing{..} -> gossip msg addr
-    _ -> enqueue msg addr
+  Direct msg addr -> gossip msg addr
+  Broadcast msg -> enqueue msg
 
   where gossip msg addr =
           yield $ UDP.Message (encode msg) addr
 
         -- FIXME: add priority queue and then have send pull from that to create compound msg
-        enqueue _msg _addr =
+        enqueue _msg =
           return ()
+
 
 -- FIXME: need a timer to mark this node as dead after suspect timeout
 suspectOrDeadNode' :: NotAlive n => Store -> Message -> MemberName -> Int -> Liveness' n -> IO (Maybe Message)
@@ -212,8 +210,27 @@ deadNode s msg@(Dead i name _) = suspectOrDeadNode' s msg name i IsDead
 deadNode _ _ = undefined
 
 aliveNode :: Store -> Message -> IO (Maybe Message)
-aliveNode = undefined
--- aliveNode s msg@(Alive i name _ _) = undefined
+aliveNode store@Store{..} msg@(Alive _ node' _ _) = do
+  ms <- atomically $ members store
+  now <- getCurrentTime
+  member <- maybe (addNewMember now msg) pure $ find ((== node') . memberName) ms
+  -- FIXME: READ THE PAPER
+  void $ fail "READ THE PAPER"
+  return Nothing
+
+  where addNewMember :: UTCTime -> Message -> IO Member
+        addNewMember now (Alive i' _ addr' port') = do
+          let member = Member { memberName = node'
+                              , memberHost = ""
+                              , memberHostNew = NS.SockAddrInet (fromIntegral port') addr'
+                              , memberAlive = IsAliveC
+                              , memberIncarnation = i'
+                              , memberLastChange = now
+                              }
+          atomically $ modifyTVar' storeMembers $ Map.insert node' member
+          pure member
+
+aliveNode _ _ = undefined
 
 invokeAckHandler :: Store -> (SeqNo, UTCTime) -> STM ()
 invokeAckHandler Store{..} = writeTMChan storeAckHandler
@@ -273,6 +290,7 @@ probeNode store@Store{..} currSeqNo gossip m = void $ runEitherT $ swapEitherT $
           -- FIXME: must exclude probe members
           membs <- lift $ kRandomMembers store (numToGossip storeCfg) []
           lift $ mapM_ (`send` msg) membs
+-- failureDetector
 
 main :: IO ()
 main = do

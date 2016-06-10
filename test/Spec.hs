@@ -172,3 +172,12 @@ main = localhost >>= \hostAddr ->
 
         beforeInc + 1 `shouldBe` afterInc
         gossip `shouldBe` [Direct (Ping 1 (node indirectPing')) addr]
+
+      it "gets Suspect" $ withStore $ \s@Store{..} -> do
+        pending
+
+      it "gets Dead" $ withStore $ \s@Store{..} -> do
+        pending
+
+      it "gets Alive" $ withStore $ \s@Store{..} -> do
+        pending
