@@ -21,8 +21,7 @@ import           Data.List.NonEmpty ( NonEmpty(..) )
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map.Strict as Map
 import           Data.Monoid ( (<>) )
-import           Data.Serialize (Serialize, encode, putWord8, putWord16be, putByteString, getWord8, remaining,
-                                 isolate, getWord16be, get, putLazyByteString, put, getLazyByteString)
+import           Data.Serialize (Serialize, encode, putWord8, putWord16be, putByteString, getWord8, remaining, isolate, getWord16be, get, putLazyByteString, put, getLazyByteString)
 import           Data.Time.Clock ( UTCTime(..) )
 import           Data.Word (Word16, Word32, Word8)
 import           Network.Socket.Internal (SockAddr)

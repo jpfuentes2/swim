@@ -44,9 +44,9 @@ sockAddr = flip SockAddrInet
 
 makeMembers :: HostAddress -> [Member]
 makeMembers host =
-  let seeds = [  ("alive", IsAlive, zeroTime, sockAddr host 4001)
-               , ("suspect", IsSuspect, zeroTime, sockAddr host 4002)
-               , ("dead", IsDead, zeroTime, sockAddr host 4003)]
+  let seeds = [  ("alive", IsAliveC, zeroTime, sockAddr host 4001)
+               , ("suspect", IsSuspectC, zeroTime, sockAddr host 4002)
+               , ("dead", IsDeadC, zeroTime, sockAddr host 4003)]
   in map (\(name, status, timeChanged, addr) ->
              Member { memberName = name
                     , memberHost = "127.0.0.1"
@@ -128,7 +128,7 @@ main = localhost >>= \hostAddr ->
         length rand `shouldBe` 0
 
       it "shuffles" $ withStore $ \s@Store{..} -> do
-        let alives = zipWith (\m i -> m { memberName = "alive-" <> show i }) (replicate total $ head defaultMembers) [0..]
+        let alives = zipWith (\m i -> m { memberName = "alive-" <> show i }) (replicate total $ head defaultMembers) ([0..] :: [Integer])
             total = 200
             n = 50
         void $ atomically $ swapTVar storeMembers $ membersMap alives
@@ -158,10 +158,10 @@ main = localhost >>= \hostAddr ->
         gossip `shouldBe` []
 
       it "gets Ack, invokes ackHandler" $ withStore $ \s@Store{..} -> do
+        pending
         gossip <- send s ack
 
         gossip `shouldBe` []
-        fail "invokesAckHandler"
 
       it "gets IndirectPing, sends Ping" $ withStore $ \s@Store{..} -> do
         let indirectPing' = indirectPing addr

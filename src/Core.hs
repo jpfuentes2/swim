@@ -77,7 +77,7 @@ members :: Store -> STM [Member]
 members Store{..} = Map.elems <$> readTVar storeMembers
 
 handleUDPMessage :: Store -> Conduit UDP.Message IO Gossip
-handleUDPMessage store =
+handleUDPMessage store@Store{..} =
   CC.map decodeUdp =$= handleDecodeErrors =$= CC.concat =$= CC.mapM (uncurry process) =$= CC.concat
   where
     decodeUdp :: UDP.Message -> Either Error [(NS.SockAddr, Message)]
@@ -95,17 +95,17 @@ handleUDPMessage store =
 
       -- respond with Ack if the ping was meant for us
       Ping seqNo' node'
-        | node' == memberName (storeSelf store) ->
+        | node' == memberName storeSelf ->
           return [Direct Ack {seqNo = seqNo', payload = []} sender]
         | otherwise ->
           return []
 
       -- send a ping to the requested target
       -- and create ack handler which relays ack from target to original requester
-      IndirectPing _seqNo' target' port' node' -> do
-        next <- liftIO $ nextIncarnation store
-        return [ Direct Ping { seqNo = fromIntegral next, node = node' } $
-                        NS.SockAddrInet (fromIntegral port') target' ]
+      IndirectPing _seqNo' target' port' node' ->
+        nextIncarnation store >>= \next ->
+          return [ Direct Ping { seqNo = fromIntegral next, node = node' } $
+                          NS.SockAddrInet (fromIntegral port') target' ]
 
       Suspect{..} ->
         maybeBroadcast $ suspectNode store msg
@@ -141,38 +141,39 @@ disseminate _store = awaitForever $ \ case
 -- FIXME: need a timer to mark this node as dead after suspect timeout
 suspectOrDeadNode' :: NotAlive n => Store -> Message -> MemberName -> Int -> Liveness' n -> IO (Maybe Message)
 suspectOrDeadNode' s@Store{..} msg name i suspectOrDead = do
-  membs <- atomically $ members s
-
-  case find ((== name) . memberName) membs of
+  ms <- atomically $ members s
+  case find ((== name) . memberName) ms of
     -- we don't know this node. ignore.
-    Nothing -> return Nothing
+    Nothing ->
+      return Nothing
 
     -- ignore old incarnation or failed livenessCheck
-    Just m | i < memberIncarnation m || livenessCheck m -> return Nothing
+    Just m | i < memberIncarnation m || livenessCheck m ->
+      return Nothing
 
     -- no cluster, we're not suspect/dead. refute it.
     Just m | name == memberName storeSelf -> do
-               i' <- atomically $ do
-                 nextInc <- nextIncarnation' s $ memberIncarnation m
-                 let m' = m { memberIncarnation = nextInc }
-                 saveMember m' >> return nextInc
+      i' <- atomically $ do
+        nextInc <- nextIncarnation' s $ memberIncarnation m
+        let m' = m { memberIncarnation = nextInc }
+        saveMember m' >> return nextInc
 
-               -- return so we don't mark ourselves suspect/dead
-               let (NS.SockAddrInet port host) = memberHostNew storeSelf
-               return $ Just Alive { incarnation = i'
-                                   , node = name
-                                   , addr = host
-                                   , port = fromIntegral port }
+      -- return so we don't mark ourselves suspect/dead
+      let (NS.SockAddrInet port host) = memberHostNew storeSelf
+      return $ Just Alive { incarnation = i'
+                          , node = name
+                          , addr = host
+                          , port = fromIntegral port }
 
     -- broadcast suspect/dead msg
     Just m -> do
       getCurrentTime >>= \now ->
         atomically $ do
           let m' = m { memberIncarnation = i
-                   , memberAlive = case suspectOrDead of
-                       IsDead -> IsDeadC
-                       IsSuspect -> IsSuspectC
-                   , memberLastChange = now }
+                     , memberAlive = case suspectOrDead of
+                         IsDead -> IsDeadC
+                         IsSuspect -> IsSuspectC
+                     , memberLastChange = now }
           saveMember m'
 
       return $ Just msg
@@ -197,7 +198,7 @@ aliveNode :: Store -> Message -> IO (Maybe Message)
 aliveNode store@Store{..} msg@(Alive _ node' _ _) = do
   ms <- atomically $ members store
   now <- getCurrentTime
-  member <- maybe (addNewMember now msg) pure $ find ((== node') . memberName) ms
+  _ <- maybe (addNewMember now msg) pure $ find ((== node') . memberName) ms
   -- FIXME: READ THE PAPER
   void $ fail "READ THE PAPER"
   return Nothing
@@ -229,9 +230,9 @@ waitForAckOf Store{..} _seqNo =
 -- failureDetector
 failureDetector :: Store -> Source IO Gossip
 failureDetector store@Store{..} = do
-  wantToGossip <- liftIO newTMChanIO
-  _ <- liftIO $ loop wantToGossip
-  sourceTMChan wantToGossip
+  gossip <- liftIO newTMChanIO
+  _ <- liftIO $ loop gossip
+  sourceTMChan gossip
 
   where loop gossip = do
           void $ after $ milliseconds (gossipInterval storeCfg)
