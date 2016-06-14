@@ -143,10 +143,6 @@ data Message = Ping { seqNo :: Word32
                     , node        :: String
                     , deadFrom    :: String
                     }
-    -- | PushPull { incarnation :: Int
-    --        , node        :: String
-    --        , deadFrom        :: String
-    --        }
     deriving (Eq, Show, Generic)
 
 instance ToJSON Message
