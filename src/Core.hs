@@ -11,14 +11,14 @@ import           Control.Concurrent (forkIO)
 import           Control.Concurrent.Async (race, race_)
 import           Control.Concurrent.STM (STM, atomically)
 import           Control.Concurrent.STM.TVar (TVar, readTVar, writeTVar, modifyTVar')
+import           Control.Monad (forever)
 import           Control.Monad.IO.Class (MonadIO (liftIO))
 import           Control.Monad.Identity (unless, void)
 import           Control.Monad.Trans.Class (lift)
-import           Control.Monad.Trans.Either (EitherT (..), hoistEither, runEitherT, swapEitherT)
 import           Data.Conduit (Conduit, Source, awaitForever, yield, ($$), (=$=))
 import qualified Data.Conduit.Combinators as CC
 import qualified Data.Conduit.Network.UDP as UDP
-import           Data.Conduit.TMChan (TMChan, newTMChanIO, sinkTMChan, sourceTMChan, writeTMChan)
+import           Data.Conduit.TMChan (newTMChanIO, sinkTMChan, sourceTMChan, writeTMChan)
 import           Data.Foldable (find)
 import qualified Data.List.NonEmpty as NEL
 import qualified Data.Map.Strict as Map
@@ -228,53 +228,45 @@ waitForAckOf Store{..} _seqNo =
       unless (s == ackSeqNo) $ ackOf s
 
 -- failureDetector
+
+-- FIXME: move from random to robust scheme
 failureDetector :: Store -> Source IO Gossip
 failureDetector store@Store{..} = do
   gossip <- liftIO newTMChanIO
-  _ <- liftIO $ loop gossip
+  void $ liftIO $ forkIO $ forever $ do
+    void $ after $ milliseconds (gossipInterval storeCfg)
+    currSeqNo <- fromIntegral <$> nextSeqNo store
+    ms <- kRandomMembers store (numToGossip storeCfg) []
+    mapM_ (\m -> probeNode' store currSeqNo m $$ sinkTMChan gossip False) ms
   sourceTMChan gossip
 
-  where loop gossip = do
-          void $ after $ milliseconds (gossipInterval storeCfg)
-          void $ forkIO $ do
-            currSeqNo <- fromIntegral <$> nextSeqNo store
-            -- FIXME: move from random to robust scheme
-            ms <- kRandomMembers store (numToGossip storeCfg) []
-            mapM_ (probeNode store currSeqNo gossip) ms
-          loop gossip
+probeNode' :: Store -> SeqNo -> Member -> Source IO Gossip
+probeNode' store@Store{..} currSeqNo m = do
+  -- ping this node via direct gossip
+  yield $ Direct (Ping currSeqNo $ memberName m) (memberHostNew m)
+  unlessAck $ do
+    -- indirectly ping this node using N proxies via direct gossip
+    ms <- liftIO $ kRandomMembers store (numToGossip storeCfg) []
+    CC.yieldMany $ map (Direct indirectPing . memberHostNew) ms
+    unlessAck $ do
+      -- run suspicion
+      suspect <- lift $ suspectNode store $ Suspect (memberIncarnation m) (memberName m)
+      maybe (return ()) (yield . Broadcast) suspect
 
-probeNode :: Store -> SeqNo -> TMChan Gossip -> Member -> IO ()
-probeNode store@Store{..} currSeqNo gossip m = void $ runEitherT $ swapEitherT $ do
-  -- we short-circuit here (stop) if we receive an Ack
-  lift (send m (Ping currSeqNo $ memberName m)) >> waitForAckOrTimeout
-  indirectPing >> waitForAckOrTimeout
-  suspect <- lift $ suspectNode store $ Suspect (memberIncarnation m) (memberName m)
-  hoistEither $ maybe (pure ()) (Right . void broadcast) suspect
+  where unlessAck :: Source IO Gossip -> Source IO Gossip
+        unlessAck f = do
+          wait <- liftIO $ race (timeout $ milliseconds $ gossipInterval storeCfg)
+                                (waitForAckOf store currSeqNo)
+          either (const $ return ()) (const f) wait
 
-  where send :: Member -> Message -> IO ()
-        send Member{..} msg =
-          atomically $ writeTMChan gossip $ Direct msg memberHostNew
-
-        broadcast :: Message -> IO ()
-        broadcast msg =
-          atomically $ writeTMChan gossip $ Broadcast msg
-
-        waitForAckOrTimeout :: EitherT Timeout IO ()
-        waitForAckOrTimeout = EitherT $
-          race (timeout $ milliseconds $ gossipInterval storeCfg)
-               (waitForAckOf store currSeqNo)
-
-        indirectPing :: EitherT Timeout IO ()
-        indirectPing = do
+        indirectPing :: Message
+        indirectPing =
           let NS.SockAddrInet port host = memberHostNew m
-              msg = IndirectPing { seqNo = currSeqNo
-                                 , target = host
-                                 , port = fromIntegral port
-                                 , node = show m
-                                 }
-          -- FIXME: must exclude probe members
-          membs <- lift $ kRandomMembers store (numToGossip storeCfg) []
-          lift $ mapM_ (`send` msg) membs
+          in  IndirectPing { seqNo = currSeqNo
+                           , target = host
+                           , port = fromIntegral port
+                           , node = show m
+                           }
 -- failureDetector
 
 main :: IO ()
